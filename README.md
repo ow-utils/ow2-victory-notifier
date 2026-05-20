@@ -52,6 +52,15 @@ cargo run -- auth youtube --client-id <GOOGLE_CLIENT_ID> --client-secret <GOOGLE
 cargo run -- run
 ```
 
+## チャットでの発言者名について
+
+本ツールは認証に使用したアカウント自身としてチャットに投稿します。Bot 用の別名表示はできません。
+
+- **Twitch**: 認証した Twitch アカウントの login_name で発言されます (IRC `NICK` に Helix `/users` で取得した login_name を渡しているため)。
+- **YouTube**: OAuth トークンを発行した Google アカウントの YouTube チャンネル名で発言されます (`liveChatMessages.insert` では `authorChannelId` を指定せず、トークン発行元のチャンネルが自動的に投稿者になります)。
+
+配信中の本アカウントで認証すると、視聴者のチャット欄に配信者本人の名前で勝敗通知が流れることになります。Bot らしく見せたい場合は、Twitch / YouTube それぞれで Bot 用のアカウント (および YouTube チャンネル) を別途用意し、そのアカウントで認証を行ってください。配信チャンネル側でモデレーター権限を与えるなどの運用が一般的です。
+
 ## 認証情報の保存先
 
 認証情報は OS の設定ディレクトリに保存されます。
