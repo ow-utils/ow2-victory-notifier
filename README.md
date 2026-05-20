@@ -58,6 +58,9 @@ cargo run -- run
 
 - Linux: `$XDG_CONFIG_HOME/ow2-victory-notifier/credentials.toml` (未設定時は `~/.config/ow2-victory-notifier/credentials.toml`)
 - macOS: `~/Library/Application Support/ow2-victory-notifier/credentials.toml`
+- Windows: `%APPDATA%\ow2-victory-notifier\credentials.toml` (通常は `C:\Users\<ユーザー名>\AppData\Roaming\ow2-victory-notifier\credentials.toml`)
+
+Unix 系ではファイルパーミッションを `0o600` に設定して所有者のみが読めるようにしますが、Windows ではこの設定は行われません。必要に応じてファイルの ACL を手動で制限してください。
 
 `credentials.toml` はリポジトリ外で管理され、git には含まれません。
 
