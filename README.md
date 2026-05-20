@@ -63,4 +63,4 @@ cargo run -- run
 
 ## ライセンス
 
-TBD
+GNU Affero General Public License v3.0 またはそれ以降 (AGPL-3.0-or-later)。詳細は [LICENSE](LICENSE) を参照してください。
