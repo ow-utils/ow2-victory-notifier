@@ -1,0 +1,21 @@
+[detector]
+sse_url = "http://127.0.0.1:3000/events"
+
+[platforms]
+twitch_enabled = true
+youtube_enabled = false
+
+[twitch]
+channel = "your_channel_name"
+
+[youtube]
+# video_id = "..."  # 通常は未指定 (現在配信中のものを自動取得)
+
+[messages]
+language = "ja"   # ja|en
+victory = "{outcome}！"
+defeat = "{outcome}…"
+draw = "{outcome}"
+
+[filter]
+auto_only = true
