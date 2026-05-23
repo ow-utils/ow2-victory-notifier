@@ -30,7 +30,15 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を検索し、「有効にする」をクリックします。
 
-> ⚠️ **クォータ上限に注意**: デフォルトの API クォータは **10,000 units / プロジェクト / 日** で、太平洋時間 (PT) の 0:00 (日本時間 16:00 または 17:00、DST に依存) にリセットされます。
+有効化後、「APIとサービス → 割り当てとシステム上限」で `YouTube Data API v3` の `Queries per day` を確認してください。
+
+> 🚨 **新規プロジェクトは初期クォータが 0 のことがあります**: 2024 年以降、Google は YouTube Data API v3 のクォータ運用を厳格化しており、**新規 GCP プロジェクトでは `Queries per day` が 0 で始まり、利用前に申請が必須**になるケースが一般化しています。0 のままだと初回 API 呼び出しが即 `quotaExceeded` で失敗します。
+>
+> その場合は [YouTube API Services - Audit and Quota Extension Form](https://support.google.com/youtube/contact/yt_api_form) から割り当て申請を提出してください。個人配信用途でも申請は通ります。フォームには使用エンドポイント (`liveChatMessages.insert`, `liveBroadcasts.list`) と想定リクエスト数を素直に記入します。審査は通常 数日〜2 週間。
+>
+> 申請が降りるまでの間は `config.toml` で `youtube_enabled = false` にして Twitch 側だけ動かす運用が現実的です。
+
+> ⚠️ **クォータ上限に注意**: 割り当てが付与された場合、デフォルトのクォータは **10,000 units / プロジェクト / 日** で、太平洋時間 (PT) の 0:00 (日本時間 16:00 または 17:00、DST に依存) にリセットされます。
 >
 > 本ツールが呼ぶエンドポイントの消費量:
 > - `liveChatMessages.insert` (勝敗投稿): **50 units / 回**
