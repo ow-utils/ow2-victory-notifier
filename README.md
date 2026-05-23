@@ -30,7 +30,18 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を検索し、「有効にする」をクリックします。
 
-> デフォルトの API クォータは 10,000 units/日 です。`liveChatMessages.insert` は 1 リクエスト 50 units 程度を消費するため、通常用途では問題になりません。
+> ⚠️ **クォータ上限に注意**: デフォルトの API クォータは **10,000 units / プロジェクト / 日** で、太平洋時間 (PT) の 0:00 (日本時間 16:00 または 17:00、DST に依存) にリセットされます。
+>
+> 本ツールが呼ぶエンドポイントの消費量:
+> - `liveChatMessages.insert` (勝敗投稿): **50 units / 回**
+> - `liveBroadcasts.list` (liveChatId 取得): 1 unit / 回
+>
+> 実上限は **約 200 投稿/日** です。超過すると `quotaExceeded` エラーで投稿が失敗します。次のケースで早期に枯渇しやすいので注意してください:
+> - 同じ GCP プロジェクトを他用途 (特に `search.list` は 100 units/回) と共有している
+> - liveChatId が無効化された後に再取得が連続失敗し、毎イベントで `liveBroadcasts.list` が走るループに陥っている (notifier のログで `liveChatId 取得失敗` が連続していないか確認)
+> - 動作検証で短時間に大量に投稿を発火させた
+>
+> 継続的に超えるようなら、本ツール専用に GCP プロジェクトを分離するか、Cloud Console の「APIとサービス → 割り当てとシステム上限」から増加申請してください (ただし `youtube` スコープのため Google の審査が必要)。
 
 #### 2-3. OAuth 同意画面の構成
 
