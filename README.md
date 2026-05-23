@@ -18,11 +18,40 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 ### 2. Google OAuth クライアント作成
 
-[Google Cloud Console](https://console.cloud.google.com/) で OAuth クライアントを作成します。
+本ツールは Google OAuth2 **Device Code Flow** (`urn:ietf:params:oauth:grant-type:device_code`) でトークンを取得し、スコープ `https://www.googleapis.com/auth/youtube` を要求します。そのため OAuth クライアントの種類は **TVs and Limited Input devices** である必要があります (Web/Desktop クライアントでは device flow は通りません)。
 
-- **Type**: TVs and Limited Input devices
-- **Client ID** と **Client Secret** を控えておきます
-- **YouTube Data API v3** を有効化します
+[Google Cloud Console](https://console.cloud.google.com/) で以下の手順を実施してください。
+
+#### 2-1. プロジェクトの作成 / 選択
+
+画面上部のプロジェクトセレクタから既存プロジェクトを選択するか、「新しいプロジェクト」で作成します。以降の操作はすべて同じプロジェクト上で行います。
+
+#### 2-2. YouTube Data API v3 の有効化
+
+「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を検索し、「有効にする」をクリックします。
+
+> デフォルトの API クォータは 10,000 units/日 です。`liveChatMessages.insert` は 1 リクエスト 50 units 程度を消費するため、通常用途では問題になりません。
+
+#### 2-3. OAuth 同意画面の構成
+
+「APIとサービス」→「OAuth 同意画面」(Google Auth Platform の「ブランディング」「対象ユーザー」「データアクセス」) を構成します。
+
+- **User Type**: **External** (個人 Google アカウントで使う場合)
+- **アプリ名 / サポートメール / デベロッパー連絡先**: 任意の値で可
+- **スコープ**: 「スコープを追加または削除」から `.../auth/youtube` (`See, edit, and permanently delete your YouTube videos, ratings, comments and captions`) を追加します。これは **機密 (sensitive) スコープ** です
+- **テストユーザー**: 配信に使う Google アカウントのメールアドレスを追加します (公開ステータスが「テスト中」の間、ここに登録されていないアカウントは認証できません)
+- **公開ステータス**: 個人利用の範囲では **「テスト中」のまま** で問題ありません
+
+> ⚠️ **「テスト中」アプリで発行された refresh token は 7 日で失効します** ([Google OAuth 2.0 仕様](https://developers.google.com/identity/protocols/oauth2#expiration))。失効すると本ツールの自動更新も失敗するため、その都度 `cargo run -- auth youtube ...` で再認証してください。継続的に使う場合はアプリを「本番環境」に公開する必要がありますが、`youtube` スコープは機密スコープのため Google の検証 (verification) が要求されます。
+
+#### 2-4. OAuth クライアント ID の作成
+
+「APIとサービス」→「認証情報」→「+認証情報を作成」→「OAuth クライアント ID」を選択。
+
+- **アプリケーションの種類 (Application type)**: **TVs and Limited Input devices**
+- **名前**: 任意 (例: `ow2-victory-notifier`)
+
+作成後に表示される **クライアント ID** と **クライアントシークレット** を控えておきます (後から「認証情報」画面で再確認可能)。これらを次のステップ 5 (`cargo run -- auth youtube --client-id ... --client-secret ...`) に渡します。
 
 ### 3. 設定ファイルの準備
 
