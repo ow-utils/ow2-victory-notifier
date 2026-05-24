@@ -96,17 +96,21 @@ impl NightbotError {
     /// 再試行で勝手に直らないものを true として呼び出し側にループ終了を促す。
     pub fn is_terminal(&self) -> bool {
         match self {
-            NightbotError::HttpStatus { error: Some(e), .. } => {
-                matches!(
-                    e.as_str(),
-                    "invalid_grant"
-                        | "invalid_client"
-                        | "unauthorized_client"
-                        // send_message / get_channel での access_token 失効
-                        // (Nightbot 側で revoke されたケース)。再試行で復旧しないため終了。
-                        | "invalid_token"
-                )
+            // token endpoint (refresh / code 交換) は RFC6749 形式の `error` を返す。
+            NightbotError::HttpStatus {
+                error: Some(e), ..
+            } if matches!(
+                e.as_str(),
+                "invalid_grant" | "invalid_client" | "unauthorized_client" | "invalid_token"
+            ) =>
+            {
+                true
             }
+            // channel API (`/1/channel/send`・`/1/channel`) は `error` を持たず `{status, message}`
+            // 形式で返すため、access_token 失効 / scope 不足は 401 / 403 として現れる。これらは
+            // ensure_fresh_token 後でも復旧しないため再認証必須として終了させる
+            // (`error` フィールドだけ見ていると send 経路の失効を取り逃がし無限リトライになる)。
+            NightbotError::HttpStatus { status, .. } if *status == 401 || *status == 403 => true,
             NightbotError::InsufficientScope { .. } => true,
             _ => false,
         }
@@ -748,6 +752,36 @@ mod tests {
         assert!(e.is_terminal());
 
         let e = NightbotError::RateLimited;
+        assert!(!e.is_terminal());
+
+        // channel API は error フィールドを持たず {status, message} 形式。
+        // 401 (access_token 失効) / 403 (scope 不足) は再認証必須として terminal。
+        let e = NightbotError::HttpStatus {
+            status: 401,
+            error: None,
+            description: Some("unauthorized".to_string()),
+            raw_body: String::new(),
+            retry_after_secs: None,
+        };
+        assert!(e.is_terminal());
+
+        let e = NightbotError::HttpStatus {
+            status: 403,
+            error: None,
+            description: Some("forbidden".to_string()),
+            raw_body: String::new(),
+            retry_after_secs: None,
+        };
+        assert!(e.is_terminal());
+
+        // 5xx は一過性として継続 (再試行で復旧しうる)。
+        let e = NightbotError::HttpStatus {
+            status: 503,
+            error: None,
+            description: None,
+            raw_body: String::new(),
+            retry_after_secs: None,
+        };
         assert!(!e.is_terminal());
     }
 
