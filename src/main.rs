@@ -154,8 +154,8 @@ async fn auth_nightbot(
 
 async fn cmd_run(account: &str, config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_file(config_path)?;
-    let (credentials, _lock) = Credentials::load_locked(account)?;
-    notifier::run(config, credentials, account).await?;
+    let (credentials, lock) = Credentials::load_locked(account)?;
+    notifier::run(config, credentials, lock, account).await?;
     Ok(())
 }
 

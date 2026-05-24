@@ -1,5 +1,5 @@
 use crate::config::{Config, MessagesConfig};
-use crate::credentials::{Credentials, CredentialsError, NightbotCreds};
+use crate::credentials::{Credentials, CredentialsError, CredentialsLock, NightbotCreds};
 use crate::nightbot;
 use crate::sse;
 use futures::StreamExt;
@@ -17,8 +17,12 @@ const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
 pub async fn run(
     config: Config,
     mut credentials: Credentials,
+    lock: CredentialsLock,
     account: &str,
 ) -> Result<(), NotifierError> {
+    // lock のライフタイムを通知ループ全体に明示的にバインドする。Drop されると
+    // flock が解放されて二重起動防止が崩れるため、関数終了まで保持し続ける。
+    let _lock = lock;
     let mut backoff = SSE_RECONNECT_INITIAL;
     loop {
         match run_once(&config, &mut credentials, account).await {
