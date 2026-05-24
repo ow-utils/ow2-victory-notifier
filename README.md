@@ -1,125 +1,136 @@
 # ow2-victory-notifier
 
-OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し、Twitch / YouTube のライブチャットに勝敗結果を自動投稿するツールです。
+OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し、**Nightbot 経由で Twitch / YouTube ライブチャットに勝敗結果を自動投稿**するツールです。
+
+投稿は Nightbot の HTTP API (`POST /1/channel/send`) のみを使います。Twitch IRC や YouTube Data API は使いません。Google API クォータ申請・OAuth 検証は不要です。
 
 ## 前提
 
 - `ow2-victory-counter` が起動しており、`http://127.0.0.1:3000/events` で SSE を配信していること
+- 投稿したいプラットフォームごとに Nightbot アカウントを所有 (Twitch と YouTube 両方なら 2 アカウント)
+  - Nightbot の 1 つの channel は 1 プラットフォーム (Twitch **または** YouTube) に固定されます。両方に同時送信したい場合は、それぞれの OAuth で Nightbot にサインアップして 2 アカウントを用意し、本ツールも 2 プロセス並列で起動します (後述)。
 
-## セットアップ
+## セットアップ (アカウントごとに繰り返す)
 
-### 1. Twitch アプリ登録
+ここでは Twitch 側を `--account twitch`、YouTube 側を `--account youtube` として 2 アカウント運用する例を示します。1 アカウントしか使わない場合は `--account` を省略すると `default` が使われます。
 
-[Twitch Developer Console](https://dev.twitch.tv/console/apps) でアプリを登録します。
+### 1. Nightbot にサインアップ
 
-- **Client Type**: Public
-- **OAuth Redirect URLs**: `http://localhost` (ダミーで可)
-- 作成後、**Client ID** を控えておきます
+投稿したいプラットフォームの OAuth で [Nightbot](https://nightbot.tv/) にサインアップします (Twitch 用なら Twitch アカウントで、YouTube 用なら Google アカウントで)。
 
-### 2. Google OAuth クライアント作成
+### 2. Nightbot を対象 channel に Join させる
 
-本ツールは Google OAuth2 **Device Code Flow** (`urn:ietf:params:oauth:grant-type:device_code`) でトークンを取得し、スコープ `https://www.googleapis.com/auth/youtube` を要求します。そのため OAuth クライアントの種類は **TVs and Limited Input devices** である必要があります (Web/Desktop クライアントでは device flow は通りません)。
+[Nightbot ダッシュボード](https://nightbot.tv/) 右上の **Join** ボタンを押して Bot を自分のチャンネルに参加させます。Join していないと送信が視聴者に届きません。
 
-[Google Cloud Console](https://console.cloud.google.com/) で以下の手順を実施してください。
+> ⚠️ **YouTube の場合**: Nightbot は配信が **live + public** の状態でのみ自動 join します。`check` で `joined=false` が出たら、まず実際の配信状態 (live で公開設定か) を確認してください。
 
-#### 2-1. プロジェクトの作成 / 選択
+### 3. Nightbot OAuth アプリの作成
 
-画面上部のプロジェクトセレクタから既存プロジェクトを選択するか、「新しいプロジェクト」で作成します。以降の操作はすべて同じプロジェクト上で行います。
+[Nightbot OAuth Applications](https://nightbot.tv/account/applications) で新規アプリを作成し、以下を設定します。
 
-#### 2-2. YouTube Data API v3 の有効化
+- **Redirect URI**: `http://127.0.0.1:8123/callback`
+  - `config.toml` で `[nightbot] callback_port` を変更している場合はそのポートに合わせる
+- **Scopes**: `channel` と `channel_send` の両方
+  - 本ツールは送信用 (`channel_send`) に加えて、`check` で `GET /1/channel` (`channel` スコープ必須) を叩いて join 状態を確認します
 
-「APIとサービス」→「ライブラリ」で **YouTube Data API v3** を検索し、「有効にする」をクリックします。
+作成後、画面に表示される **Client ID** と **Client Secret** を控えます。
 
-有効化後、「APIとサービス → 割り当てとシステム上限」で `YouTube Data API v3` の `Queries per day` を確認してください。
-
-> 🚨 **新規プロジェクトは初期クォータが 0 のことがあります**: 2024 年以降、Google は YouTube Data API v3 のクォータ運用を厳格化しており、**新規 GCP プロジェクトでは `Queries per day` が 0 で始まり、利用前に申請が必須**になるケースが一般化しています。0 のままだと初回 API 呼び出しが即 `quotaExceeded` で失敗します。
->
-> その場合は [YouTube API Services - Audit and Quota Extension Form](https://support.google.com/youtube/contact/yt_api_form) から割り当て申請を提出してください。個人配信用途でも申請は通ります。フォームには使用エンドポイント (`liveChatMessages.insert`, `liveBroadcasts.list`) と想定リクエスト数を素直に記入します。審査は通常 数日〜2 週間。
->
-> 申請が降りるまでの間は `config.toml` で `youtube_enabled = false` にして Twitch 側だけ動かす運用が現実的です。
-
-> ⚠️ **クォータ上限に注意**: 割り当てが付与された場合、デフォルトのクォータは **10,000 units / プロジェクト / 日** で、太平洋時間 (PT) の 0:00 (日本時間 16:00 または 17:00、DST に依存) にリセットされます。
->
-> 本ツールが呼ぶエンドポイントの消費量:
-> - `liveChatMessages.insert` (勝敗投稿): **50 units / 回**
-> - `liveBroadcasts.list` (liveChatId 取得): 1 unit / 回
->
-> 実上限は **約 200 投稿/日** です。超過すると `quotaExceeded` エラーで投稿が失敗します。次のケースで早期に枯渇しやすいので注意してください:
-> - 同じ GCP プロジェクトを他用途 (特に `search.list` は 100 units/回) と共有している
-> - liveChatId が無効化された後に再取得が連続失敗し、毎イベントで `liveBroadcasts.list` が走るループに陥っている (notifier のログで `liveChatId 取得失敗` が連続していないか確認)
-> - 動作検証で短時間に大量に投稿を発火させた
->
-> 継続的に超えるようなら、本ツール専用に GCP プロジェクトを分離するか、Cloud Console の「APIとサービス → 割り当てとシステム上限」から増加申請してください (ただし `youtube` スコープのため Google の審査が必要)。
-
-#### 2-3. OAuth 同意画面の構成
-
-「APIとサービス」→「OAuth 同意画面」(Google Auth Platform の「ブランディング」「対象ユーザー」「データアクセス」) を構成します。
-
-- **User Type**: **External** (個人 Google アカウントで使う場合)
-- **アプリ名 / サポートメール / デベロッパー連絡先**: 任意の値で可
-- **スコープ**: 「スコープを追加または削除」から `.../auth/youtube` (`See, edit, and permanently delete your YouTube videos, ratings, comments and captions`) を追加します。これは **機密 (sensitive) スコープ** です
-- **テストユーザー**: 配信に使う Google アカウントのメールアドレスを追加します (公開ステータスが「テスト中」の間、ここに登録されていないアカウントは認証できません)
-- **公開ステータス**: 個人利用の範囲では **「テスト中」のまま** で問題ありません
-
-> ⚠️ **「テスト中」アプリで発行された refresh token は 7 日で失効します** ([Google OAuth 2.0 仕様](https://developers.google.com/identity/protocols/oauth2#expiration))。失効すると本ツールの自動更新も失敗するため、その都度 `cargo run -- auth youtube ...` で再認証してください。継続的に使う場合はアプリを「本番環境」に公開する必要がありますが、`youtube` スコープは機密スコープのため Google の検証 (verification) が要求されます。
-
-#### 2-4. OAuth クライアント ID の作成
-
-「APIとサービス」→「認証情報」→「+認証情報を作成」→「OAuth クライアント ID」を選択。
-
-- **アプリケーションの種類 (Application type)**: **TVs and Limited Input devices**
-- **名前**: 任意 (例: `ow2-victory-notifier`)
-
-作成後に表示される **クライアント ID** と **クライアントシークレット** を控えておきます (後から「認証情報」画面で再確認可能)。これらを次のステップ 5 (`cargo run -- auth youtube --client-id ... --client-secret ...`) に渡します。
-
-### 3. 設定ファイルの準備
+### 4. 設定ファイルの準備
 
 ```sh
 cp config.example.toml config.toml
 ```
 
-`config.toml` を編集して各項目を設定します。
+`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
 
-### 4. Twitch 認証 (Device Code Flow)
+### 5. 認証
 
-```sh
-cargo run -- auth twitch --client-id <TWITCH_CLIENT_ID>
-```
-
-表示された URL にアクセスしてコードを入力し、認証を完了してください。
-
-### 5. YouTube 認証
+**推奨**: client_secret は環境変数経由で渡します (シェル履歴・`ps`・`/proc/{pid}/cmdline` に残らない)。
 
 ```sh
-cargo run -- auth youtube --client-id <GOOGLE_CLIENT_ID> --client-secret <GOOGLE_CLIENT_SECRET>
+export NIGHTBOT_CLIENT_SECRET='<コピーした Client Secret>'
+cargo run -- auth nightbot --account twitch \
+    --client-id <コピーした Client ID> \
+    --client-secret-env NIGHTBOT_CLIENT_SECRET
 ```
 
-### 6. 常駐起動
+表示された URL をブラウザで開き、Nightbot の承認画面で `channel` と `channel_send` の 2 スコープを許可します。
+
+`--client-secret <SECRET>` で直接渡すこともできますが、シェル履歴と `ps` に残るため非推奨です (試験用途のみ)。
+
+### 6. 通知ループの起動
 
 ```sh
-cargo run -- run
+cargo run -- run --account twitch
 ```
 
-## チャットでの発言者名について
+## 両プラットフォーム同時運用
 
-本ツールは認証に使用したアカウント自身としてチャットに投稿します。Bot 用の別名表示はできません。
+`--account twitch` と `--account youtube` を **別プロセス** で並列起動します:
 
-- **Twitch**: 認証した Twitch アカウントの login_name で発言されます (IRC `NICK` に Helix `/users` で取得した login_name を渡しているため)。
-- **YouTube**: OAuth トークンを発行した Google アカウントの YouTube チャンネル名で発言されます (`liveChatMessages.insert` では `authorChannelId` を指定せず、トークン発行元のチャンネルが自動的に投稿者になります)。
+```sh
+cargo run -- run --account twitch &
+cargo run -- run --account youtube &
+```
 
-配信中の本アカウントで認証すると、視聴者のチャット欄に配信者本人の名前で勝敗通知が流れることになります。Bot らしく見せたい場合は、Twitch / YouTube それぞれで Bot 用のアカウント (および YouTube チャンネル) を別途用意し、そのアカウントで認証を行ってください。配信チャンネル側でモデレーター権限を与えるなどの運用が一般的です。
+> ⚠️ **同じ `--account` を 2 プロセスで同時起動しないこと**。両方が並行 refresh して片方が `invalid_grant` を踏み、credentials が壊れます。本ツールは fs2 advisory lock で同一 account の二重起動を検出し、2 つ目のプロセスは起動時に明示エラー終了します。
+
+## チャットでの発言者名
+
+両プラットフォームとも `Nightbot` 名義で投稿されます (Nightbot API 経由のため)。視聴者から見て自動通知と本人発言が区別しやすくなります。
 
 ## 認証情報の保存先
 
-認証情報は OS の設定ディレクトリに保存されます。
+アカウントごとにファイルが分かれます。
 
-- Linux: `$XDG_CONFIG_HOME/ow2-victory-notifier/credentials.toml` (未設定時は `~/.config/ow2-victory-notifier/credentials.toml`)
-- macOS: `~/Library/Application Support/ow2-victory-notifier/credentials.toml`
-- Windows: `%APPDATA%\ow2-victory-notifier\credentials.toml` (通常は `C:\Users\<ユーザー名>\AppData\Roaming\ow2-victory-notifier\credentials.toml`)
+- Linux: `$XDG_CONFIG_HOME/ow2-victory-notifier/credentials-{account}.toml` (未設定時は `~/.config/...`)
+- macOS: `~/Library/Application Support/ow2-victory-notifier/credentials-{account}.toml`
+- Windows: `%APPDATA%\ow2-victory-notifier\credentials-{account}.toml`
 
-Unix 系ではファイルパーミッションを `0o600` に設定して所有者のみが読めるようにしますが、Windows ではこの設定は行われません。必要に応じてファイルの ACL を手動で制限してください。
+Unix ではファイルパーミッションを `0o600` に設定します。Windows では OS の ACL に依存します。書き込みは tempfile による atomic replace で行うため、プロセスクラッシュ / SIGKILL でファイル破損する可能性は低いですが、電源断レベルの耐性は best-effort です (unix では親ディレクトリ fsync まで実施)。
 
-`credentials.toml` はリポジトリ外で管理され、git には含まれません。
+同じ account の二重起動を防ぐため `credentials-{account}.lock` という sidecar ファイルも作られます (advisory flock、プロセス終了で OS が自動解放)。
+
+## Nightbot 依存についての注意
+
+本ツールは投稿経路を Nightbot に完全に委ねています。次のいずれかが起きると投稿が止まります。
+
+- Nightbot 側の障害 (API ダウン / レート制限)
+- アカウント停止 / Join 解除
+- Nightbot 側 OAuth アプリの設定変更 (Redirect URI の不一致など)
+
+### refresh_token の失効と延命
+
+Nightbot の **refresh_token は「最後の使用から 60 日」で失効** します (access_token は約 30 日)。本ツールは SSE イベント (= 試合終了通知) を受けたタイミングで access_token の残り時間が 60 秒以下のとき限り refresh するため、**60 日以上 SSE イベントが発生しないと refresh_token が更新されません**。
+
+長期間配信が途絶える運用では、**60 日以内に 1 回以上** 次のいずれかを実行して refresh_token を rotate してください。
+
+```sh
+cargo run -- check --account <name> --force-refresh
+```
+
+`--force-refresh` を付けると期限判定を迂回して無条件で refresh + 保存します。フラグ無しの `check` は access_token が残っている間は refresh を発火しないため、延命にはなりません。
+
+#### `run` 常駐中は `check --force-refresh` 不可
+
+同一 account の二重起動を fs2 advisory lock で防いでいるため、`run --account <name>` が走っている間に別プロセスで `check --account <name> --force-refresh` を起動すると **lock 競合で即終了** します。延命手順は次のいずれかです:
+
+- **(推奨)** `run` を一時停止 (`kill` / `systemctl stop`) → `check --account <name> --force-refresh` を実行 → `run` を再開
+- 長期間配信予定が無いなら `run` を止めておき、60 日以内に 1 回 `check --account <name> --force-refresh` のみ実行
+
+### 障害時の切り分け手順
+
+1. `cargo run -- check --account <name>` で疎通確認 (SSE + Nightbot API + Join 状態)
+2. [Nightbot ダッシュボード](https://nightbot.tv/) でアカウント・Join 状態を確認
+3. 必要なら `auth nightbot --account <name> ...` で再認証
+
+## 旧版 (Twitch IRC / YouTube Data API) からの移行
+
+旧 Twitch IRC / YouTube Data API 経路は廃止のため、旧 `credentials.toml` は使えなくなりました。
+
+1. 旧 `…/ow2-victory-notifier/credentials.toml` を手動削除
+2. 旧 `config.toml` の `[platforms]` / `[twitch]` / `[youtube]` セクションを削除し、`config.example.toml` を参考に新フォーマットへ書き換え
+3. 本 README のセットアップ手順を最初から実施して Nightbot で再認証
 
 ## ライセンス
 
