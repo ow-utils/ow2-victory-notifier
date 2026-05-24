@@ -3,13 +3,51 @@ use crate::credentials::{Credentials, CredentialsError, NightbotCreds};
 use crate::nightbot;
 use crate::sse;
 use futures::StreamExt;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
+/// SSE ストリーム終了時の再接続バックオフ初期値。失敗のたび倍にして上限で頭打ち。
+const SSE_RECONNECT_INITIAL: Duration = Duration::from_secs(1);
+const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
+
 /// 通知ループ。Nightbot 経由でライブチャットに勝敗を投稿する。
-/// SSE ストリームが切れたら終了 (eventsource-client 自動再接続後の永続切断のみ来る想定)。
+/// eventsource-client は内部再接続を行うが、まれにストリーム自体が終了するため
+/// (counter 側の長時間ダウンや TLS セッション枯渇) 外側でもバックオフ付きで再構築する。
+/// 致命エラー (CredentialsSaveFailed) のみ Err で抜け、それ以外は無限ループ。
 pub async fn run(
     config: Config,
     mut credentials: Credentials,
+    account: &str,
+) -> Result<(), NotifierError> {
+    let mut backoff = SSE_RECONNECT_INITIAL;
+    loop {
+        match run_once(&config, &mut credentials, account).await {
+            Ok(()) => {
+                warn!(
+                    "SSE ストリームが終了しました。{} 秒後に再接続します",
+                    backoff.as_secs()
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(SSE_RECONNECT_MAX);
+            }
+            Err(NotifierError::Sse(e)) => {
+                warn!(
+                    "SSE 接続失敗 ({}). {} 秒後に再試行します",
+                    e,
+                    backoff.as_secs()
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(SSE_RECONNECT_MAX);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// SSE ストリーム 1 セッション分の処理。終了 (ストリーム完了) または致命エラーで戻る。
+async fn run_once(
+    config: &Config,
+    credentials: &mut Credentials,
     account: &str,
 ) -> Result<(), NotifierError> {
     let mut stream =
@@ -75,7 +113,6 @@ pub async fn run(
         }
     }
 
-    warn!("SSE ストリームが終了しました");
     Ok(())
 }
 
