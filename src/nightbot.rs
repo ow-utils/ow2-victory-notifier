@@ -432,7 +432,9 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         })
     } else {
         let recorded = redact_token_body(&body);
-        let err: ErrorBody = serde_json::from_str(&body).unwrap_or_default();
+        // error/description も redact 済み本文から取り出し、raw_body と派生元を揃える
+        // (description は Display に出るため secret echo への防御を一貫させる)。
+        let err: ErrorBody = serde_json::from_str(&recorded).unwrap_or_default();
         Err(NightbotError::HttpStatus {
             status: status.as_u16(),
             error: err.error,
@@ -637,7 +639,8 @@ async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, 
             }
         })
     } else {
-        let err: ErrorBody = serde_json::from_str(&body).unwrap_or_default();
+        // raw_body (redacted) と error/description の派生元を揃える。
+        let err: ErrorBody = serde_json::from_str(&redacted).unwrap_or_default();
         Err(NightbotError::HttpStatus {
             status: status.as_u16(),
             error: err.error,
