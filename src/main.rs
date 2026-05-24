@@ -266,16 +266,20 @@ async fn cmd_check(
                 false
             }
             Err(e) => {
-                // 通常の check は疎通確認なので一過性エラーでは継続するが、再認証必須
-                // (refresh_token 失効等) は成功終了させず明示する。
+                // check は「SSE + Nightbot API + Join 状態」の疎通確認コマンド。refresh が
+                // 必要な状況で token endpoint に到達できない (非 terminal な一過性エラーを含む)
+                // のは Nightbot 疎通失敗そのものなので、get_channel 失敗と同様に非ゼロ終了させる
+                // (Ok(()) で抜けると疎通確認が成功扱いになり健全性確認が無意味になる)。
                 if e.is_terminal() {
                     return Err(format!(
                         "Nightbot: 再認証が必要です ({e})。`auth nightbot --account {account}` を実行してください"
                     )
                     .into());
                 }
-                println!("  Nightbot: refresh 失敗: {}", e);
-                return Ok(());
+                return Err(format!(
+                    "Nightbot: refresh 失敗 ({e})。token endpoint に到達できません。ネットワーク疎通を確認のうえ再実行してください"
+                )
+                .into());
             }
         }
     };
