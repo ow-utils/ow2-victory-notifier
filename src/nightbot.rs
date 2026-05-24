@@ -268,9 +268,11 @@ pub async fn authenticate(
     println!("以下の URL をブラウザーで開いて認証してください:\n{authorize_url}");
     println!("(Ctrl+C で中断できます)");
 
-    let join_result = server_handle.await?;
+    // server_handle の await 結果を ? で受ける前に必ず signal_task を abort する。
+    // 先に `await?` で JoinError を伝播させると ctrl_c 待ちタスクが abort されず残る。
+    let join_result = server_handle.await;
     signal_task.abort();
-    let CallbackResult { code } = join_result?;
+    let CallbackResult { code } = join_result??;
 
     // 4. token endpoint で code をトークンに交換
     let redirect_uri = format!("http://127.0.0.1:{callback_port}/callback");
