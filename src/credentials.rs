@@ -77,12 +77,18 @@ impl Credentials {
             .truncate(false)
             .open(&lock_path)
             .map_err(|e| CredentialsError::Io(lock_path.display().to_string(), e))?;
-        lock_file
-            .try_lock_exclusive()
-            .map_err(|_e| CredentialsError::Locked {
-                account: account.to_string(),
-                path: lock_path.clone(),
-            })?;
+        lock_file.try_lock_exclusive().map_err(|e| {
+            // 競合 (既にロック保持) は WouldBlock。それ以外 (権限不足 / FS 障害 /
+            // flock 未サポート) を「別プロセスが使用中」に丸めると誤診断になるため Io で分ける。
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                CredentialsError::Locked {
+                    account: account.to_string(),
+                    path: lock_path.clone(),
+                }
+            } else {
+                CredentialsError::Io(lock_path.display().to_string(), e)
+            }
+        })?;
         let lock = CredentialsLock { file: lock_file };
 
         // 前回 SIGKILL や電源断で取り残された tmp (credentials-{account}.toml.tmp.*) を掃除。
