@@ -231,10 +231,12 @@ async fn cmd_check(
         }
     };
     if refreshed && let Err(e) = credentials.save(account) {
-        eprintln!(
-            "  Nightbot: credentials 保存失敗 ({e})。`auth nightbot --account {account}` で再認証してください"
-        );
-        return Ok(());
+        // notifier::run と同じ方針で「rotation 後の save 失敗」は致命扱いにする。
+        // Ok(()) で抜けるとユーザは延命に成功したと誤認しがちなので必ず非ゼロ終了させる。
+        return Err(format!(
+            "Nightbot: credentials 保存失敗 ({e})。新 refresh_token がディスクに永続化されていません。`auth nightbot --account {account}` で再認証してください"
+        )
+        .into());
     }
 
     // 必要なら credentials を再借用 (save の所有権)

@@ -1,6 +1,6 @@
 use crate::config::{Config, MessagesConfig};
 use crate::credentials::{Credentials, CredentialsError, CredentialsLock, NightbotCreds};
-use crate::nightbot;
+use crate::nightbot::{self, NightbotError};
 use crate::sse;
 use futures::StreamExt;
 use std::time::Duration;
@@ -101,8 +101,17 @@ async fn run_once(
                 }
             }
             Ok(false) => {}
+            Err(e) if e.is_terminal() => {
+                error!(
+                    "token refresh が再試行不能なエラー ({e})。`auth nightbot --account {account}` で再認証してください"
+                );
+                return Err(NotifierError::TerminalAuth {
+                    account: account.to_string(),
+                    source: e,
+                });
+            }
             Err(e) => {
-                warn!("token refresh 失敗: {}", e);
+                warn!("token refresh 失敗 (継続): {}", e);
                 continue;
             }
         }
@@ -152,6 +161,12 @@ pub enum NotifierError {
         account: String,
         #[source]
         source: CredentialsError,
+    },
+    #[error("Nightbot 認証が再認証必須 (account={account}): {source}. `auth nightbot --account {account}` を実行してください")]
+    TerminalAuth {
+        account: String,
+        #[source]
+        source: NightbotError,
     },
 }
 

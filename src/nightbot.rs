@@ -90,6 +90,24 @@ pub enum NightbotError {
     Reqwest(#[from] reqwest::Error),
 }
 
+impl NightbotError {
+    /// 再認証なしには復旧できないエラーかどうか。`refresh` の `invalid_grant`
+    /// (refresh_token 失効) や `invalid_client` (OAuth アプリの secret 変更) など、
+    /// 再試行で勝手に直らないものを true として呼び出し側にループ終了を促す。
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            NightbotError::HttpStatus { error: Some(e), .. } => {
+                matches!(
+                    e.as_str(),
+                    "invalid_grant" | "invalid_client" | "unauthorized_client"
+                )
+            }
+            NightbotError::InsufficientScope { .. } => true,
+            _ => false,
+        }
+    }
+}
+
 pub(crate) fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -680,6 +698,36 @@ mod tests {
         assert!(!red.contains("shh"));
         assert!(!red.contains("jwt"));
         assert!(red.contains("keep"));
+    }
+
+    #[test]
+    fn is_terminal_classifies_invalid_grant() {
+        let e = NightbotError::HttpStatus {
+            status: 400,
+            error: Some("invalid_grant".to_string()),
+            description: None,
+            raw_body: String::new(),
+            retry_after_secs: None,
+        };
+        assert!(e.is_terminal());
+
+        let e = NightbotError::HttpStatus {
+            status: 500,
+            error: Some("server_error".to_string()),
+            description: None,
+            raw_body: String::new(),
+            retry_after_secs: None,
+        };
+        assert!(!e.is_terminal());
+
+        let e = NightbotError::InsufficientScope {
+            granted: "channel".to_string(),
+            missing: vec!["channel_send".to_string()],
+        };
+        assert!(e.is_terminal());
+
+        let e = NightbotError::RateLimited;
+        assert!(!e.is_terminal());
     }
 
     #[test]
