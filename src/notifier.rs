@@ -88,7 +88,7 @@ pub async fn run(config: Config, mut credentials: Credentials) -> Result<(), Not
         }
 
         if changed {
-            if let Err(e) = credentials.save() {
+            if let Err(e) = credentials.save("default") {
                 warn!("credentials の保存に失敗: {}", e);
             } else {
                 tracing::debug!("credentials を更新保存しました");
