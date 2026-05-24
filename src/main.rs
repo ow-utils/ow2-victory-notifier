@@ -192,8 +192,10 @@ async fn cmd_check(
     println!("account: {} (callback_port={})", account, config.nightbot.callback_port);
 
     println!("SSE 接続テスト: {}", config.detector.sse_url);
-    // 低速回線・proxy 経由だと TLS ハンドシェイク + 初回 event 受信に時間がかかるため、
-    // 3 秒だと「timeout だけど実は成立」のミスリードが出やすい。10 秒に伸ばす。
+    // eventsource-client は内部で自動再接続するため、接続先がダウンしていても
+    // `s.next().await` は Err を返さず再試行し続ける。よって「最初の event を受信できたか」
+    // しか確実には判定できない (= timeout は接続不成立とイベント無流入の両方を含む)。
+    // この性質を踏まえ、timeout を成功側に倒さず "未確認" として正直に出す。
     match tokio::time::timeout(std::time::Duration::from_secs(10), async {
         use futures::StreamExt;
         let mut s = sse::connect(&config.detector.sse_url).map_err(|e| e.to_string())?;
@@ -202,9 +204,12 @@ async fn cmd_check(
     })
     .await
     {
-        Ok(Ok(())) => println!("  SSE: 接続成功"),
-        Ok(Err(e)) => println!("  SSE: 接続失敗: {}", e),
-        Err(_) => println!("  SSE: タイムアウト (接続は成立した可能性あり)"),
+        Ok(Ok(())) => println!("  SSE: event 受信を確認 (接続成功)"),
+        // connect() 自体の失敗 (URL パース等)。ストリーム断は自動再接続されるためここには来にくい。
+        Ok(Err(e)) => println!("  SSE: 接続初期化に失敗: {}", e),
+        Err(_) => println!(
+            "  SSE: 10 秒以内に event を受信できませんでした (サーバ無応答 / event 未流入のいずれか。接続可否は判定不能)"
+        ),
     }
 
     let Some(creds) = credentials.nightbot.as_mut() else {
