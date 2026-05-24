@@ -48,6 +48,10 @@ impl Credentials {
     }
 
     fn lock_path_in(dir: &Path, account: &str) -> PathBuf {
+        // lock ファイル本体はプロセス終了後も意図的に残置する。`remove_file` を unlock の
+        // 前に挟むと別プロセスが新規 open 中に inode が差し変わり、両者が「自分が排他取得した」
+        // と思い込む race の元になる。OS の flock はファイル消失で自動解放されないため、
+        // 残ったファイルがあっても 2 回目以降の `try_lock_exclusive` は正しく挙動する。
         dir.join(format!("credentials-{account}.lock"))
     }
 

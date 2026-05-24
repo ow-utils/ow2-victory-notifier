@@ -84,18 +84,30 @@ impl NightbotClientSecret {
     }
 }
 
+/// account 名はファイル名 (`credentials-{account}.toml`) になるため、ファイルシステム上限
+/// (ext4 で 255 byte) より十分手前で弾く。長さ無制限だとパス由来の I/O エラーになり
+/// バリデーション NG だと気付きにくい。
+const ACCOUNT_MAX_LEN: usize = 64;
+
 fn validate_account(name: &str) -> Result<(), String> {
-    if !name.is_empty()
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "--account 名が不正です: '{name}' (a-zA-Z0-9_- のみ許容、空文字不可)"
-        ))
+    if name.is_empty() {
+        return Err("--account 名が空です".to_string());
     }
+    if name.len() > ACCOUNT_MAX_LEN {
+        return Err(format!(
+            "--account 名が長すぎます ({} > {ACCOUNT_MAX_LEN})",
+            name.len()
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(format!(
+            "--account 名が不正です: '{name}' (a-zA-Z0-9_- のみ許容)"
+        ));
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -170,7 +182,9 @@ async fn cmd_check(
     println!("account: {} (callback_port={})", account, config.nightbot.callback_port);
 
     println!("SSE 接続テスト: {}", config.detector.sse_url);
-    match tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    // 低速回線・proxy 経由だと TLS ハンドシェイク + 初回 event 受信に時間がかかるため、
+    // 3 秒だと「timeout だけど実は成立」のミスリードが出やすい。10 秒に伸ばす。
+    match tokio::time::timeout(std::time::Duration::from_secs(10), async {
         use futures::StreamExt;
         let mut s = sse::connect(&config.detector.sse_url).map_err(|e| e.to_string())?;
         let _ = s.next().await;
@@ -260,4 +274,43 @@ async fn cmd_check(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_account_accepts_valid_names() {
+        assert!(validate_account("default").is_ok());
+        assert!(validate_account("twitch_1").is_ok());
+        assert!(validate_account("a-b-c").is_ok());
+        assert!(validate_account("A").is_ok());
+    }
+
+    #[test]
+    fn validate_account_rejects_empty() {
+        assert!(validate_account("").is_err());
+    }
+
+    #[test]
+    fn validate_account_rejects_path_traversal() {
+        assert!(validate_account("../etc").is_err());
+        assert!(validate_account("a/b").is_err());
+        assert!(validate_account(".").is_err());
+    }
+
+    #[test]
+    fn validate_account_rejects_non_ascii() {
+        assert!(validate_account("日本語").is_err());
+        assert!(validate_account("a b").is_err());
+    }
+
+    #[test]
+    fn validate_account_rejects_overlong() {
+        let name = "a".repeat(ACCOUNT_MAX_LEN + 1);
+        assert!(validate_account(&name).is_err());
+        let name = "a".repeat(ACCOUNT_MAX_LEN);
+        assert!(validate_account(&name).is_ok());
+    }
 }

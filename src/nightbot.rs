@@ -207,6 +207,7 @@ struct TokenResponse {
 
 #[derive(Deserialize, Default)]
 struct ErrorBody {
+    // Option<T> でも serde は missing field をエラー扱いするため、#[serde(default)] が必要。
     #[serde(default)]
     error: Option<String>,
     #[serde(default)]
@@ -534,7 +535,7 @@ fn run_callback_server(
                 error_kind, description
             );
             let _ = req.respond(make_html_response(
-                "<html><body>認証が拒否されました。詳細は CLI のログを参照してください。</body></html>",
+                "認証が拒否されました。詳細は CLI のログを参照してください。",
                 200,
             ));
             return Err(NightbotError::AuthDenied {
@@ -559,7 +560,7 @@ fn run_callback_server(
             }
             let code = params.get("code").cloned().unwrap_or_default();
             let _ = req.respond(make_html_response(
-                "<html><body>認証が完了しました。このウィンドウを閉じてください。</body></html>",
+                "認証が完了しました。このウィンドウを閉じてください。",
                 200,
             ));
             return Ok(CallbackResult { code });
@@ -570,7 +571,15 @@ fn run_callback_server(
     }
 }
 
-fn make_html_response(body: &str, status: u16) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+fn make_html_response(
+    message: &str,
+    status: u16,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    // 固定文言のみ埋め込む (外部入力は CLI 側のログにだけ流すため XSS リスクは無いが、
+    // DOCTYPE と lang/charset を付けてモバイル含む各ブラウザで日本語が確実に出るようにする)。
+    let body = format!(
+        "<!DOCTYPE html><html lang=\"ja\"><head><meta charset=\"utf-8\"><title>ow2-victory-notifier</title></head><body>{message}</body></html>"
+    );
     tiny_http::Response::from_string(body)
         .with_status_code(status)
         .with_header(
