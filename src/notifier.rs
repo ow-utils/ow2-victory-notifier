@@ -24,6 +24,10 @@ pub async fn run(
     lock: CredentialsLock,
     account: &str,
 ) -> Result<(), NotifierError> {
+    // テンプレート展開後の文面が上限を超える設定では毎試合投稿が落ち続けるため、
+    // SSE ループに入る前に弾く。
+    validate_message_lengths(&config.messages)?;
+
     // lock のライフタイムを通知ループ全体に明示的にバインドする。Drop されると
     // flock が解放されて二重起動防止が崩れるため、関数終了まで保持し続ける。
     let _lock = lock;
@@ -190,6 +194,28 @@ pub enum NotifierError {
         #[source]
         source: NightbotError,
     },
+    #[error("messages.{outcome} の文面がテンプレート展開後 {len} 文字で Nightbot の上限 {max} 文字を超えています。config.toml を見直してください")]
+    MessageTooLong {
+        outcome: String,
+        len: usize,
+        max: usize,
+    },
+}
+
+/// config のテンプレートを展開した文面が Nightbot の文字数上限を超えないか検証する。
+/// run / check の起動時に呼び、毎試合 `MessageTooLong` で投稿が落ち続ける設定を早期に弾く。
+pub fn validate_message_lengths(messages: &MessagesConfig) -> Result<(), NotifierError> {
+    for outcome in ["victory", "defeat", "draw"] {
+        let len = build_message(messages, outcome).chars().count();
+        if len > nightbot::MESSAGE_MAX_CHARS {
+            return Err(NotifierError::MessageTooLong {
+                outcome: outcome.to_string(),
+                len,
+                max: nightbot::MESSAGE_MAX_CHARS,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -232,5 +258,32 @@ mod tests {
     fn build_message_unknown_outcome_returns_empty() {
         let m = msgs("ja");
         assert_eq!(build_message(&m, "unknown"), "");
+    }
+
+    #[test]
+    fn validate_message_lengths_accepts_normal() {
+        assert!(validate_message_lengths(&msgs("ja")).is_ok());
+    }
+
+    #[test]
+    fn validate_message_lengths_rejects_overlong() {
+        let mut m = msgs("ja");
+        m.defeat = "あ".repeat(nightbot::MESSAGE_MAX_CHARS + 1);
+        match validate_message_lengths(&m) {
+            Err(NotifierError::MessageTooLong { outcome, len, max }) => {
+                assert_eq!(outcome, "defeat");
+                assert_eq!(len, nightbot::MESSAGE_MAX_CHARS + 1);
+                assert_eq!(max, nightbot::MESSAGE_MAX_CHARS);
+            }
+            other => panic!("expected MessageTooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_message_lengths_counts_chars_after_expansion() {
+        // {outcome} 展開後の文字数で判定する (テンプレート自体は短くても展開で超えうる)。
+        let mut m = msgs("ja");
+        m.victory = format!("{{outcome}}{}", "x".repeat(nightbot::MESSAGE_MAX_CHARS));
+        assert!(validate_message_lengths(&m).is_err());
     }
 }

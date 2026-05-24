@@ -191,6 +191,12 @@ async fn cmd_check(
     println!("config: ok ({})", config_path);
     println!("account: {} (callback_port={})", account, config.nightbot.callback_port);
 
+    // 文面長を起動前に検証 (上限超過だと run 時に毎試合投稿が落ち続けるため early に弾く)。
+    match notifier::validate_message_lengths(&config.messages) {
+        Ok(()) => println!("messages: ok (文面長は上限内)"),
+        Err(e) => return Err(e.into()),
+    }
+
     println!("SSE 接続テスト: {}", config.detector.sse_url);
     // eventsource-client は内部で自動再接続するため、接続先がダウンしていても
     // `s.next().await` は Err を返さず再試行し続ける。よって「最初の event を受信できたか」
