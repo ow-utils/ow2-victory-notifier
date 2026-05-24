@@ -45,7 +45,7 @@ pub async fn run(
                     backoff.as_secs()
                 );
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(SSE_RECONNECT_MAX);
+                backoff = backoff.saturating_mul(2).min(SSE_RECONNECT_MAX);
             }
             Err(NotifierError::Sse(e)) => {
                 warn!(
@@ -54,7 +54,7 @@ pub async fn run(
                     backoff.as_secs()
                 );
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(SSE_RECONNECT_MAX);
+                backoff = backoff.saturating_mul(2).min(SSE_RECONNECT_MAX);
             }
             Err(e) => return Err(e),
         }
