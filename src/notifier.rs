@@ -3,7 +3,7 @@ use crate::credentials::{Credentials, CredentialsError, CredentialsLock, Nightbo
 use crate::nightbot::{self, NightbotError};
 use crate::sse;
 use futures::StreamExt;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
 /// SSE ストリーム終了時の再接続バックオフ初期値。失敗のたび倍にして上限で頭打ち。
@@ -41,10 +41,17 @@ pub async fn run(
     // lock のライフタイムを通知ループ全体に明示的にバインドする。Drop されると
     // flock が解放されて二重起動防止が崩れるため、関数終了まで保持し続ける。
     let _lock = lock;
+
+    // counter 側は SSE 接続直後に必ず現在状態 (直近の last_broadcast) のスナップショットを
+    // 送る。これは過去に処理済みの勝敗 (last_outcome / source) を保持し得るため、起動・再接続
+    // のたびに直前の結果を重複投稿してしまう。各イベントの timestamp で dedupe し、起動時刻
+    // 以前 (= 監視開始前に発生した結果) と再接続時の再送 (= 既処理の最大 timestamp 以下) を弾く。
+    // 起動時刻を初期下限にすることで、cold start 時のスナップショット投稿も同時に防ぐ。
+    let mut last_processed_ts = unix_secs_f64();
     let mut backoff = SSE_RECONNECT_INITIAL;
     loop {
         let started = Instant::now();
-        match run_once(&config, &mut credentials, account).await {
+        match run_once(&config, &mut credentials, account, &mut last_processed_ts).await {
             Ok(()) => {
                 let lifetime = started.elapsed();
                 if lifetime >= SSE_HEALTHY_DURATION {
@@ -80,6 +87,7 @@ async fn run_once(
     config: &Config,
     credentials: &mut Credentials,
     account: &str,
+    last_processed_ts: &mut f64,
 ) -> Result<(), NotifierError> {
     let mut stream =
         sse::connect(&config.detector.sse_url).map_err(|e| NotifierError::Sse(e.to_string()))?;
@@ -89,6 +97,18 @@ async fn run_once(
     );
 
     while let Some(update) = stream.next().await {
+        // 接続直後のスナップショットや再接続時の再送など、既に処理済み (= 最大 timestamp 以下)
+        // のイベントを無視する。新しい結果は必ず新しい timestamp を持つため取りこぼさない。
+        if is_replayed(update.timestamp, *last_processed_ts) {
+            tracing::debug!(
+                "skip replayed/stale event: ts={} <= {}",
+                update.timestamp,
+                last_processed_ts
+            );
+            continue;
+        }
+        *last_processed_ts = update.timestamp;
+
         if config.filter.auto_only && update.source != "auto" {
             tracing::debug!("skip: source={}", update.source);
             continue;
@@ -163,6 +183,23 @@ async fn run_once(
     }
 
     Ok(())
+}
+
+/// 現在の UNIX 時刻を秒 (f64) で返す。SSE イベントの timestamp (counter 側が
+/// `as_secs_f64` で生成) と同じ尺度で dedupe するために使う。
+fn unix_secs_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// イベントが既処理 (接続直後のスナップショット再送や再接続時の重複) かを判定する。
+/// counter 側のスナップショットは直近 broadcast と同一 timestamp を持つため、これまでに
+/// 処理した最大 timestamp 以下なら再送とみなす。起動時刻を初期下限にすることで、監視開始
+/// 前に発生した結果 (cold start のスナップショット) も同時に弾く。
+fn is_replayed(event_ts: f64, last_processed_ts: f64) -> bool {
+    event_ts <= last_processed_ts
 }
 
 fn build_message(messages: &MessagesConfig, outcome: &str) -> String {
@@ -270,6 +307,20 @@ mod tests {
     fn build_message_unknown_outcome_returns_empty() {
         let m = msgs("ja");
         assert_eq!(build_message(&m, "unknown"), "");
+    }
+
+    #[test]
+    fn is_replayed_skips_snapshot_and_reconnect_replay() {
+        let start = 1000.0;
+        // cold start: 監視開始前 (start 以下) のスナップショットは弾く。
+        assert!(is_replayed(999.0, start));
+        assert!(is_replayed(1000.0, start));
+        // 開始後に発生した新しい結果は処理する。
+        assert!(!is_replayed(1001.0, start));
+        // 処理済み (last=1001) の結果が再接続スナップショットで再送されても弾く。
+        assert!(is_replayed(1001.0, 1001.0));
+        // さらに新しい結果は処理する。
+        assert!(!is_replayed(1002.0, 1001.0));
     }
 
     #[test]
