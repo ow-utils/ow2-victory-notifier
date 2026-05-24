@@ -7,30 +7,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Credentials {
     #[serde(default)]
-    pub twitch: Option<TwitchCreds>,
-    #[serde(default)]
-    pub youtube: Option<YoutubeCreds>,
-    #[serde(default)]
     pub nightbot: Option<NightbotCreds>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TwitchCreds {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: u64,
-    pub client_id: String,
-    #[serde(default)]
-    pub login_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct YoutubeCreds {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: u64,
-    pub client_id: String,
-    pub client_secret: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -177,16 +154,6 @@ impl Credentials {
 
         tracing::debug!("credentials saved to {}", final_path.display());
         Ok(())
-    }
-
-    #[allow(dead_code)] // 次コミットで twitch/youtube モジュール本体ごと削除
-    pub fn set_twitch(&mut self, creds: TwitchCreds) {
-        self.twitch = Some(creds);
-    }
-
-    #[allow(dead_code)] // 次コミットで twitch/youtube モジュール本体ごと削除
-    pub fn set_youtube(&mut self, creds: YoutubeCreds) {
-        self.youtube = Some(creds);
     }
 
     pub fn set_nightbot(&mut self, creds: NightbotCreds) {
