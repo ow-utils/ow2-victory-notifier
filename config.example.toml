@@ -1,15 +1,10 @@
 [detector]
 sse_url = "http://127.0.0.1:3000/events"
 
-[platforms]
-twitch_enabled = true
-youtube_enabled = false
-
-[twitch]
-channel = "your_channel_name"
-
-[youtube]
-# video_id = "..."  # 通常は未指定 (現在配信中のものを自動取得)
+# [nightbot]
+# callback_port = 8123  # OAuth コールバック受け取り用ローカルポート (auth サブコマンドのみで使用)。
+                        # 変更時は Nightbot OAuth アプリの Redirect URI も
+                        # http://127.0.0.1:<新ポート>/callback に揃える必要あり。
 
 [messages]
 language = "ja"   # ja|en

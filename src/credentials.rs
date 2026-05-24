@@ -179,10 +179,12 @@ impl Credentials {
         Ok(())
     }
 
+    #[allow(dead_code)] // 次コミットで twitch/youtube モジュール本体ごと削除
     pub fn set_twitch(&mut self, creds: TwitchCreds) {
         self.twitch = Some(creds);
     }
 
+    #[allow(dead_code)] // 次コミットで twitch/youtube モジュール本体ごと削除
     pub fn set_youtube(&mut self, creds: YoutubeCreds) {
         self.youtube = Some(creds);
     }

@@ -3,8 +3,6 @@ mod credentials;
 mod nightbot;
 mod notifier;
 mod sse;
-mod twitch;
-mod youtube;
 
 use clap::{Args, Parser, Subcommand};
 use config::Config;
@@ -27,28 +25,26 @@ enum Commands {
     },
     /// 通知ループを実行
     Run {
+        #[arg(short, long, default_value = "default")]
+        account: String,
         #[arg(short, long, default_value = "config.toml")]
         config: String,
     },
     /// 設定と接続の疎通確認
     Check {
+        #[arg(short, long, default_value = "default")]
+        account: String,
         #[arg(short, long, default_value = "config.toml")]
         config: String,
+        /// 期限に関係なく refresh_token を rotate して延命する
+        /// (run 常駐中は lock 競合で失敗する点に注意)。
+        #[arg(long)]
+        force_refresh: bool,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum AuthPlatform {
-    Twitch {
-        #[arg(long)]
-        client_id: String,
-    },
-    Youtube {
-        #[arg(long)]
-        client_id: String,
-        #[arg(long)]
-        client_secret: String,
-    },
     /// Nightbot OAuth (Authorization Code Flow)。
     /// callback_port は config から取得し、credentials に保存する。
     Nightbot {
@@ -113,11 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = CliArgs::parse();
     match args.command {
         Commands::Auth { platform } => match platform {
-            AuthPlatform::Twitch { client_id } => auth_twitch(&client_id).await?,
-            AuthPlatform::Youtube {
-                client_id,
-                client_secret,
-            } => auth_youtube(&client_id, &client_secret).await?,
             AuthPlatform::Nightbot {
                 account,
                 config,
@@ -129,30 +120,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 auth_nightbot(&account, &config, &client_id, &client_secret).await?;
             }
         },
-        Commands::Run { config } => cmd_run(&config).await?,
-        Commands::Check { config } => cmd_check(&config).await?,
+        Commands::Run { account, config } => {
+            validate_account(&account)?;
+            cmd_run(&account, &config).await?;
+        }
+        Commands::Check {
+            account,
+            config,
+            force_refresh,
+        } => {
+            validate_account(&account)?;
+            cmd_check(&account, &config, force_refresh).await?;
+        }
     }
-    Ok(())
-}
-
-async fn auth_twitch(client_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let creds = twitch::authenticate(client_id).await?;
-    let (mut store, _lock) = Credentials::load_locked("default")?;
-    store.set_twitch(creds);
-    store.save("default")?;
-    println!("Twitch の認証情報を保存しました");
-    Ok(())
-}
-
-async fn auth_youtube(
-    client_id: &str,
-    client_secret: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let creds = youtube::authenticate(client_id, client_secret).await?;
-    let (mut store, _lock) = Credentials::load_locked("default")?;
-    store.set_youtube(creds);
-    store.save("default")?;
-    println!("YouTube の認証情報を保存しました");
     Ok(())
 }
 
@@ -172,17 +152,22 @@ async fn auth_nightbot(
     Ok(())
 }
 
-async fn cmd_run(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_run(account: &str, config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_file(config_path)?;
-    let (credentials, _lock) = Credentials::load_locked("default")?;
-    notifier::run(config, credentials).await?;
+    let (credentials, _lock) = Credentials::load_locked(account)?;
+    notifier::run(config, credentials, account).await?;
     Ok(())
 }
 
-async fn cmd_check(config_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_check(
+    account: &str,
+    config_path: &str,
+    force_refresh: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_file(config_path)?;
-    let (mut credentials, _lock) = Credentials::load_locked("default")?;
+    let (mut credentials, _lock) = Credentials::load_locked(account)?;
     println!("config: ok ({})", config_path);
+    println!("account: {} (callback_port={})", account, config.nightbot.callback_port);
 
     println!("SSE 接続テスト: {}", config.detector.sse_url);
     match tokio::time::timeout(std::time::Duration::from_secs(3), async {
@@ -193,35 +178,83 @@ async fn cmd_check(config_path: &str) -> Result<(), Box<dyn std::error::Error>> 
     })
     .await
     {
-        Ok(Ok(())) => println!("  SSE: 接続成功 (1イベント or タイムアウト前にデータ受信)"),
+        Ok(Ok(())) => println!("  SSE: 接続成功"),
         Ok(Err(e)) => println!("  SSE: 接続失敗: {}", e),
         Err(_) => println!("  SSE: タイムアウト (接続は成立した可能性あり)"),
     }
 
-    if config.platforms.twitch_enabled {
-        match credentials.twitch.as_mut() {
-            Some(c) => match twitch::refresh(c).await {
-                Ok(()) => {
-                    credentials.save("default").ok();
-                    println!("  Twitch: refresh OK");
-                }
-                Err(e) => println!("  Twitch: refresh 失敗: {}", e),
-            },
-            None => println!("  Twitch: 認証情報なし (auth twitch を実行)"),
+    let Some(creds) = credentials.nightbot.as_mut() else {
+        println!(
+            "  Nightbot: 認証情報なし (`auth nightbot --account {account}` を実行)"
+        );
+        return Ok(());
+    };
+
+    // expires_at から残時間を表示
+    let now = nightbot::now_epoch_secs();
+    let remaining_secs = creds.expires_at.saturating_sub(now);
+    println!(
+        "  access_token: 残り {} 分 ({} 秒)",
+        remaining_secs / 60,
+        remaining_secs
+    );
+
+    // refresh: --force-refresh なら無条件、それ以外は ensure_fresh_token に委ねる。
+    // 直接 nightbot::refresh を呼んでから ensure_fresh_token に渡すと、後者が Ok(false) を
+    // 返して save が走らなくなり新 refresh_token を失う。--force-refresh 経路でも refresh →
+    // 即 save の順を守る。
+    let refreshed = if force_refresh {
+        match nightbot::refresh(creds).await {
+            Ok(()) => {
+                println!("  Nightbot: --force-refresh で refresh OK");
+                true
+            }
+            Err(e) => {
+                println!("  Nightbot: refresh 失敗: {}", e);
+                return Ok(());
+            }
         }
+    } else {
+        match nightbot::ensure_fresh_token(creds).await {
+            Ok(true) => {
+                println!("  Nightbot: 期限間近につき refresh OK");
+                true
+            }
+            Ok(false) => {
+                println!("  Nightbot: 期限十分のため refresh スキップ");
+                false
+            }
+            Err(e) => {
+                println!("  Nightbot: refresh 失敗: {}", e);
+                return Ok(());
+            }
+        }
+    };
+    if refreshed && let Err(e) = credentials.save(account) {
+        eprintln!(
+            "  Nightbot: credentials 保存失敗 ({e})。`auth nightbot --account {account}` で再認証してください"
+        );
+        return Ok(());
     }
 
-    if config.platforms.youtube_enabled {
-        match credentials.youtube.as_mut() {
-            Some(c) => match youtube::refresh(c).await {
-                Ok(()) => {
-                    credentials.save("default").ok();
-                    println!("  YouTube: refresh OK");
-                }
-                Err(e) => println!("  YouTube: refresh 失敗: {}", e),
-            },
-            None => println!("  YouTube: 認証情報なし (auth youtube を実行)"),
+    // 必要なら credentials を再借用 (save の所有権)
+    let Some(creds) = credentials.nightbot.as_ref() else {
+        return Ok(());
+    };
+
+    match nightbot::get_channel(creds).await {
+        Ok(info) => {
+            println!(
+                "  Nightbot channel: provider={} name={:?} joined={}",
+                info.provider, info.name, info.joined
+            );
+            if !info.joined {
+                tracing::warn!(
+                    "Nightbot が channel に Join していません。https://nightbot.tv/ ダッシュボードで Join 操作をしてください (YouTube は配信 live + public 時のみ自動 join)"
+                );
+            }
         }
+        Err(e) => println!("  Nightbot get_channel 失敗: {}", e),
     }
 
     Ok(())

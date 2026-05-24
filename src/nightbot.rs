@@ -9,11 +9,20 @@ use crate::credentials::NightbotCreds;
 
 const TOKEN_URL: &str = "https://api.nightbot.tv/oauth2/token";
 const AUTHORIZE_URL: &str = "https://api.nightbot.tv/oauth2/authorize";
+const CHANNEL_URL: &str = "https://api.nightbot.tv/1/channel";
+const CHANNEL_SEND_URL: &str = "https://api.nightbot.tv/1/channel/send";
 
 const CALLBACK_DEADLINE: Duration = Duration::from_secs(300);
 const RECV_POLL: Duration = Duration::from_millis(250);
 
 const REQUIRED_SCOPES: &[&str] = &["channel", "channel_send"];
+
+/// Nightbot 仕様: /1/channel/send は 400 文字までを受け付ける。
+const MESSAGE_MAX_CHARS: usize = 400;
+/// access_token 残り時間が これ以下になったら refresh する (秒)。
+const REFRESH_MARGIN_SECS: u64 = 60;
+/// 429 リトライ時のフォールバック待機 (Nightbot は 5 秒に 1 リクエスト)。
+const RATE_LIMIT_FALLBACK_SECS: u64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NightbotError {
@@ -33,10 +42,8 @@ pub enum NightbotError {
         granted: String,
         missing: Vec<String>,
     },
-    #[allow(dead_code)] // 次コミットで send_message から使う
     #[error("メッセージが 400 文字を超えています (len={len})")]
     MessageTooLong { len: usize },
-    #[allow(dead_code)] // 次コミットで send_message から使う
     #[error("Nightbot API のレート制限に連続でヒットしました")]
     RateLimited,
     #[error("Nightbot API HTTP {status} error={error:?} desc={description:?} retry_after={retry_after_secs:?} body={raw_body}")]
@@ -200,6 +207,168 @@ pub async fn authenticate(
         client_secret: client_secret.to_string(),
         callback_port,
     })
+}
+
+/// 期限切れまで `REFRESH_MARGIN_SECS` 以下なら refresh を発火する。
+/// 戻り値 = refresh が走ったか (true なら呼び出し側は直ちに `credentials.save()` すること)。
+pub async fn ensure_fresh_token(creds: &mut NightbotCreds) -> Result<bool, NightbotError> {
+    let now = now_epoch_secs();
+    // 加算側比較で u64 underflow を回避 (`expires_at - now < margin` だと expires_at < now で wrap)。
+    if creds.expires_at > now.saturating_add(REFRESH_MARGIN_SECS) {
+        return Ok(false);
+    }
+    refresh(creds).await?;
+    Ok(true)
+}
+
+/// refresh_token を使って access_token を更新する。Nightbot は rotation するため
+/// 新 refresh_token も同時に保存する。redirect_uri は authorize 時の値と一致必須なため
+/// `creds.callback_port` (authenticate 時に保存した値) を使う。
+pub async fn refresh(creds: &mut NightbotCreds) -> Result<(), NightbotError> {
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", creds.callback_port);
+    let client = reqwest::Client::new();
+    let req = client.post(TOKEN_URL).form(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", creds.refresh_token.as_str()),
+        ("redirect_uri", redirect_uri.as_str()),
+        ("client_id", creds.client_id.as_str()),
+        ("client_secret", creds.client_secret.as_str()),
+    ]);
+    let resp = req.send().await?;
+    let token = parse_token_response(resp).await?;
+    creds.access_token = token.access_token;
+    creds.refresh_token = token.refresh_token;
+    creds.expires_at = now_epoch_secs().saturating_add(token.expires_in);
+    // client_id / client_secret / callback_port は変更しない。
+    Ok(())
+}
+
+/// 取得済み Bearer トークンで現在 join 中の channel 情報を返す。
+pub async fn get_channel(creds: &NightbotCreds) -> Result<ChannelInfo, NightbotError> {
+    let client = reqwest::Client::new();
+    let req = client.get(CHANNEL_URL).bearer_auth(&creds.access_token);
+    let resp: ChannelResponse = fetch_json(req, false).await?;
+    Ok(ChannelInfo {
+        joined: resp.channel.joined,
+        provider: resp.channel.provider,
+        name: resp.channel.name,
+    })
+}
+
+/// channel に投稿する。事前に `ensure_fresh_token` で access_token が新鮮であることを保証すること。
+/// 400 文字超過は `MessageTooLong` で送信せず返す (誤った文面が流れるのを避ける)。
+/// 429 は `Retry-After` (または 5 秒) 待機して 1 回だけリトライ。
+pub async fn send_message(creds: &NightbotCreds, message: &str) -> Result<(), NightbotError> {
+    let char_count = message.chars().count();
+    if char_count > MESSAGE_MAX_CHARS {
+        return Err(NightbotError::MessageTooLong { len: char_count });
+    }
+    let attempt = || async {
+        let client = reqwest::Client::new();
+        let req = client
+            .post(CHANNEL_SEND_URL)
+            .bearer_auth(&creds.access_token)
+            .json(&serde_json::json!({ "message": message }));
+        fetch_no_body(req, false).await
+    };
+    match attempt().await {
+        Ok(()) => Ok(()),
+        Err(NightbotError::HttpStatus {
+            status: 429,
+            retry_after_secs,
+            ..
+        }) => {
+            let wait = retry_after_secs.unwrap_or(RATE_LIMIT_FALLBACK_SECS);
+            warn!("Nightbot 429: {} 秒待機して 1 回だけリトライします", wait);
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            match attempt().await {
+                Ok(()) => Ok(()),
+                Err(NightbotError::HttpStatus { status: 429, .. }) => Err(NightbotError::RateLimited),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelInfo {
+    pub joined: bool,
+    pub provider: String,
+    pub name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChannelResponse {
+    channel: ChannelObject,
+}
+
+#[derive(Deserialize)]
+struct ChannelObject {
+    joined: bool,
+    provider: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// 共通 HTTP 処理 (成功時は JSON body を T にパース)。token endpoint からの呼び出しでは
+/// `redact = true` を渡してエラー本文に access_token / refresh_token を残さない。
+async fn fetch_json<T: serde::de::DeserializeOwned>(
+    req: reqwest::RequestBuilder,
+    redact: bool,
+) -> Result<T, NightbotError> {
+    let resp = req.send().await?;
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let body = resp.text().await?;
+    let recorded = if redact { redact_token_body(&body) } else { body.clone() };
+    if status.is_success() {
+        serde_json::from_str::<T>(&body).map_err(|source| NightbotError::ResponseParse {
+            body: recorded,
+            source,
+        })
+    } else {
+        let err: ErrorBody = serde_json::from_str(&body).unwrap_or_default();
+        Err(NightbotError::HttpStatus {
+            status: status.as_u16(),
+            error: err.error,
+            description: err.error_description.or(err.message),
+            raw_body: recorded,
+            retry_after_secs: retry_after,
+        })
+    }
+}
+
+/// 成功 body を捨てる版。/1/channel/send で使う (Nightbot は ack を返すだけ)。
+async fn fetch_no_body(
+    req: reqwest::RequestBuilder,
+    redact: bool,
+) -> Result<(), NightbotError> {
+    let resp = req.send().await?;
+    let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let body = resp.text().await?;
+    if status.is_success() {
+        Ok(())
+    } else {
+        let recorded = if redact { redact_token_body(&body) } else { body };
+        let err: ErrorBody = serde_json::from_str(&recorded).unwrap_or_default();
+        Err(NightbotError::HttpStatus {
+            status: status.as_u16(),
+            error: err.error,
+            description: err.error_description.or(err.message),
+            raw_body: recorded,
+            retry_after_secs: retry_after,
+        })
+    }
 }
 
 fn run_callback_server(

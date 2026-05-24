@@ -1,22 +1,25 @@
-use crate::config::Config;
-use crate::credentials::Credentials;
+use crate::config::{Config, MessagesConfig};
+use crate::credentials::{Credentials, CredentialsError, NightbotCreds};
+use crate::nightbot;
 use crate::sse;
-use crate::{twitch, youtube};
 use futures::StreamExt;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-/// 通知ループ。Ctrl+C や SSE エラーで終了するまで動作する。
-pub async fn run(config: Config, mut credentials: Credentials) -> Result<(), NotifierError> {
-    let mut stream = sse::connect(&config.detector.sse_url)
-        .map_err(|e| NotifierError::Sse(e.to_string()))?;
-
-    info!("通知ループ開始: SSE={}", config.detector.sse_url);
-
-    // YouTube の liveChatId キャッシュ。配信開始のタイミングで取得する
-    let mut youtube_live_chat_id: Option<String> = None;
+/// 通知ループ。Nightbot 経由でライブチャットに勝敗を投稿する。
+/// SSE ストリームが切れたら終了 (eventsource-client 自動再接続後の永続切断のみ来る想定)。
+pub async fn run(
+    config: Config,
+    mut credentials: Credentials,
+    account: &str,
+) -> Result<(), NotifierError> {
+    let mut stream =
+        sse::connect(&config.detector.sse_url).map_err(|e| NotifierError::Sse(e.to_string()))?;
+    info!(
+        "通知ループ開始: SSE={} account={}",
+        config.detector.sse_url, account
+    );
 
     while let Some(update) = stream.next().await {
-        // フィルタ
         if config.filter.auto_only && update.source != "auto" {
             tracing::debug!("skip: source={}", update.source);
             continue;
@@ -28,76 +31,63 @@ pub async fn run(config: Config, mut credentials: Credentials) -> Result<(), Not
             continue;
         }
 
-        let localized = localize_outcome(outcome, &config.messages.language);
-        let template = match outcome {
-            "victory" => &config.messages.victory,
-            "defeat" => &config.messages.defeat,
-            "draw" => &config.messages.draw,
-            _ => unreachable!(),
-        };
-        let text = template.replace("{outcome}", localized);
+        let text = build_message(&config.messages, outcome);
         info!("通知: outcome={} text={}", outcome, text);
 
-        let mut changed = false;
+        let Some(creds) = credentials.nightbot.as_mut() else {
+            warn!(
+                "Nightbot 認証情報がありません ({0}). `auth nightbot --account {0}` を実行してください",
+                account
+            );
+            continue;
+        };
 
-        if config.platforms.twitch_enabled {
-            if let Some(creds) = credentials.twitch.as_mut() {
-                let before_token = creds.access_token.clone();
-                match twitch::send_message(creds, &config.twitch.channel, &text).await {
-                    Ok(()) => info!("Twitch 投稿成功"),
-                    Err(e) => warn!("Twitch 投稿失敗: {}", e),
+        // refresh が走ったら send より前に save。save 失敗時はメモリ上の (新) token と
+        // ファイル上の (旧、Nightbot 側で既に失効) token が乖離するため、修復不能状態を作らない
+        // よう即終了する。
+        match nightbot::ensure_fresh_token(creds).await {
+            Ok(true) => {
+                if let Err(e) = credentials.save(account) {
+                    error!(
+                        "rotation 後の credentials 保存に失敗。修復不能の場合は `auth nightbot --account {}` で再認証してください: {}",
+                        account, e
+                    );
+                    return Err(NotifierError::CredentialsSaveFailed {
+                        account: account.to_string(),
+                        source: e,
+                    });
                 }
-                if creds.access_token != before_token {
-                    changed = true;
-                }
-            } else {
-                warn!("Twitch が有効ですが認証情報がありません。`auth twitch` を実行してください");
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!("token refresh 失敗: {}", e);
+                continue;
             }
         }
 
-        if config.platforms.youtube_enabled {
-            if let Some(creds) = credentials.youtube.as_mut() {
-                let before_token = creds.access_token.clone();
-                // liveChatId をキャッシュ。未取得/取得失敗時は都度試す
-                if youtube_live_chat_id.is_none() {
-                    match youtube::get_active_live_chat_id(creds).await {
-                        Ok(Some(id)) => {
-                            info!("YouTube liveChatId 取得: {}", id);
-                            youtube_live_chat_id = Some(id);
-                        }
-                        Ok(None) => warn!("YouTube 配信が見つかりません (active な配信が無い)"),
-                        Err(e) => warn!("YouTube liveChatId 取得失敗: {}", e),
-                    }
-                }
-                if let Some(id) = youtube_live_chat_id.as_deref() {
-                    match youtube::send_message(creds, id, &text).await {
-                        Ok(()) => info!("YouTube 投稿成功"),
-                        Err(e) => {
-                            warn!("YouTube 投稿失敗: {}", e);
-                            // 配信終了などで liveChatId が無効になった可能性 → キャッシュをクリア
-                            youtube_live_chat_id = None;
-                        }
-                    }
-                }
-                if creds.access_token != before_token {
-                    changed = true;
-                }
-            } else {
-                warn!("YouTube が有効ですが認証情報がありません。`auth youtube` を実行してください");
-            }
-        }
-
-        if changed {
-            if let Err(e) = credentials.save("default") {
-                warn!("credentials の保存に失敗: {}", e);
-            } else {
-                tracing::debug!("credentials を更新保存しました");
-            }
+        let creds_ref: &NightbotCreds = credentials
+            .nightbot
+            .as_ref()
+            .expect("nightbot creds were Some above and refresh does not unset");
+        match nightbot::send_message(creds_ref, &text).await {
+            Ok(()) => info!("Nightbot 投稿成功"),
+            Err(e) => warn!("Nightbot 投稿失敗: {}", e),
         }
     }
 
     warn!("SSE ストリームが終了しました");
     Ok(())
+}
+
+fn build_message(messages: &MessagesConfig, outcome: &str) -> String {
+    let localized = localize_outcome(outcome, &messages.language);
+    let template = match outcome {
+        "victory" => &messages.victory,
+        "defeat" => &messages.defeat,
+        "draw" => &messages.draw,
+        _ => return String::new(),
+    };
+    template.replace("{outcome}", localized)
 }
 
 fn localize_outcome(outcome: &str, language: &str) -> &'static str {
@@ -116,4 +106,53 @@ fn localize_outcome(outcome: &str, language: &str) -> &'static str {
 pub enum NotifierError {
     #[error("SSE 接続失敗: {0}")]
     Sse(String),
+    #[error("credentials 保存失敗 (account={account}): {source}")]
+    CredentialsSaveFailed {
+        account: String,
+        #[source]
+        source: CredentialsError,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msgs(language: &str) -> MessagesConfig {
+        MessagesConfig {
+            language: language.to_string(),
+            victory: "{outcome}！".to_string(),
+            defeat: "{outcome}…".to_string(),
+            draw: "{outcome}".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_message_ja() {
+        let m = msgs("ja");
+        assert_eq!(build_message(&m, "victory"), "勝利！");
+        assert_eq!(build_message(&m, "defeat"), "敗北…");
+        assert_eq!(build_message(&m, "draw"), "引き分け");
+    }
+
+    #[test]
+    fn build_message_en() {
+        let m = msgs("en");
+        assert_eq!(build_message(&m, "victory"), "Victory！");
+        assert_eq!(build_message(&m, "defeat"), "Defeat…");
+        assert_eq!(build_message(&m, "draw"), "Draw");
+    }
+
+    #[test]
+    fn build_message_template_without_placeholder() {
+        let mut m = msgs("ja");
+        m.victory = "固定文言".to_string();
+        assert_eq!(build_message(&m, "victory"), "固定文言");
+    }
+
+    #[test]
+    fn build_message_unknown_outcome_returns_empty() {
+        let m = msgs("ja");
+        assert_eq!(build_message(&m, "unknown"), "");
+    }
 }
