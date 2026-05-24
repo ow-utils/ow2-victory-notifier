@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
@@ -53,6 +55,8 @@ pub enum NightbotError {
     },
     #[error("OAuth コールバックがタイムアウトしました。`auth nightbot` を再実行してください")]
     CallbackTimeout,
+    #[error("OAuth コールバック待機中に Ctrl+C で中断されました")]
+    CallbackAborted,
     #[error("OAuth コールバック処理スレッドが落ちました: {0}")]
     CallbackTaskJoin(#[from] tokio::task::JoinError),
     #[error("ローカル HTTP サーバ起動失敗: {0}")]
@@ -210,11 +214,20 @@ pub async fn authenticate(
         .map_err(|e| NightbotError::ServerStart(format!("getrandom 失敗: {e}")))?;
     let state: String = state_bytes.iter().map(|b| format!("{:02x}", b)).collect();
 
-    // 2. callback 待受サーバを spawn_blocking で起動 (recv_timeout ポーリング + Instant deadline)
+    // 2. callback 待受サーバを spawn_blocking で起動 (recv_timeout ポーリング + Instant deadline)。
+    //    Ctrl+C を受けたら abort flag を立て、ループが次の poll tick で即終了する。
+    let abort = Arc::new(AtomicBool::new(false));
+    let abort_for_signal = abort.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            abort_for_signal.store(true, Ordering::SeqCst);
+        }
+    });
     let state_for_server = state.clone();
+    let abort_for_server = abort.clone();
     let server_handle = tokio::task::spawn_blocking(
         move || -> Result<CallbackResult, NightbotError> {
-            run_callback_server(callback_port, &state_for_server)
+            run_callback_server(callback_port, &state_for_server, abort_for_server)
         },
     );
 
@@ -225,8 +238,11 @@ pub async fn authenticate(
         "{AUTHORIZE_URL}?response_type=code&client_id={encoded_id}&redirect_uri=http%3A%2F%2F127.0.0.1%3A{callback_port}%2Fcallback&scope=channel%20channel_send&state={encoded_state}"
     );
     println!("以下の URL をブラウザーで開いて認証してください:\n{authorize_url}");
+    println!("(Ctrl+C で中断できます)");
 
-    let CallbackResult { code } = server_handle.await??;
+    let join_result = server_handle.await?;
+    signal_task.abort();
+    let CallbackResult { code } = join_result?;
 
     // 4. token endpoint で code をトークンに交換
     let redirect_uri = format!("http://127.0.0.1:{callback_port}/callback");
@@ -428,6 +444,7 @@ async fn fetch_no_body(req: reqwest::RequestBuilder) -> Result<(), NightbotError
 fn run_callback_server(
     callback_port: u16,
     expected_state: &str,
+    abort: Arc<AtomicBool>,
 ) -> Result<CallbackResult, NightbotError> {
     let server = tiny_http::Server::http(("127.0.0.1", callback_port)).map_err(|e| {
         if let Some(io) = e.downcast_ref::<std::io::Error>()
@@ -442,6 +459,9 @@ fn run_callback_server(
 
     let deadline = Instant::now() + CALLBACK_DEADLINE;
     loop {
+        if abort.load(Ordering::SeqCst) {
+            return Err(NightbotError::CallbackAborted);
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(NightbotError::CallbackTimeout);
