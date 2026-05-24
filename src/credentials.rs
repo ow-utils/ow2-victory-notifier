@@ -88,18 +88,25 @@ impl Credentials {
         // 前回 SIGKILL や電源断で取り残された credentials-{account}.toml.* tmp を掃除。
         // lock を取った後に走らせるので他プロセスの書きかけは存在しないと仮定する。
         let prefix = format!("{}.", Self::file_name(account));
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
-                    continue;
-                };
-                if !name.starts_with(&prefix) {
-                    continue;
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                        continue;
+                    };
+                    if !name.starts_with(&prefix) {
+                        continue;
+                    }
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("起動時 tmp 掃除に失敗 ({}): {}", path.display(), e);
+                    }
                 }
-                if let Err(e) = std::fs::remove_file(&path) {
-                    tracing::warn!("起動時 tmp 掃除に失敗 ({}): {}", path.display(), e);
-                }
+            }
+            Err(e) => {
+                // 掃除は best-effort だが、`read_dir` 自体の失敗 (権限 / FS 障害) は
+                // 後段の save / load にも影響するので警告は出す。
+                tracing::warn!("起動時 tmp 掃除の read_dir 失敗 ({}): {}", dir.display(), e);
             }
         }
 

@@ -1,9 +1,12 @@
 use eventsource_client::{Client, ClientBuilder, SSE};
 use futures::stream::{Stream, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::pin::Pin;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
+// notifier は last_outcome / source しか読まないが、SSE スキーマ契約として全フィールドを
+// 受理する (必須キーが消えたら早期にパース失敗で気付きたい)。
+#[allow(dead_code)]
 pub struct CounterUpdate {
     pub victories: u32,
     pub defeats: u32,

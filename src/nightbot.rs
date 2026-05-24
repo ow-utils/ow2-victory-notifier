@@ -342,6 +342,8 @@ pub async fn refresh(creds: &mut NightbotCreds) -> Result<(), NightbotError> {
 }
 
 /// 取得済み Bearer トークンで現在 join 中の channel 情報を返す。
+/// 事前に `ensure_fresh_token` で access_token が新鮮であることを保証すること
+/// (send_message と同じ前提)。
 pub async fn get_channel(creds: &NightbotCreds) -> Result<ChannelInfo, NightbotError> {
     let req = http_client().get(CHANNEL_URL).bearer_auth(&creds.access_token);
     let resp: ChannelResponse = fetch_json(req).await?;
@@ -421,13 +423,15 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
     let body = resp.text().await?;
-    let recorded = redact_token_body(&body);
     if status.is_success() {
+        // 成功時は redact 計算を省く (正常系のホットパスで毎回 JSON 再シリアライズしない)。
+        // パース失敗時のみ redact してエラーに詰める。
         serde_json::from_str::<T>(&body).map_err(|source| NightbotError::ResponseParse {
-            body: recorded,
+            body: redact_token_body(&body),
             source,
         })
     } else {
+        let recorded = redact_token_body(&body);
         let err: ErrorBody = serde_json::from_str(&body).unwrap_or_default();
         Err(NightbotError::HttpStatus {
             status: status.as_u16(),

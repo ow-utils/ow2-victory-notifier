@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub detector: DetectorConfig,
     #[serde(default)]
@@ -10,12 +10,12 @@ pub struct Config {
     pub filter: FilterConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DetectorConfig {
     pub sse_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct NightbotConfig {
     /// OAuth Authorization Code Flow のコールバックを受けるローカルポート。既定 8123。
     /// 変更時は Nightbot OAuth アプリの Redirect URI も合わせること。
@@ -38,7 +38,7 @@ fn default_callback_port() -> u16 {
     8123
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct MessagesConfig {
     pub language: String, // "ja" or "en"
     pub victory: String,
@@ -46,7 +46,7 @@ pub struct MessagesConfig {
     pub draw: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct FilterConfig {
     pub auto_only: bool,
 }
