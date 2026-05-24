@@ -162,7 +162,14 @@ async fn auth_nightbot(
     let (mut store, _lock) = Credentials::load_locked(account)?;
     let creds = nightbot::authenticate(client_id, client_secret, callback_port).await?;
     store.set_nightbot(creds);
-    store.save(account)?;
+    // ブラウザ承認・token 交換は成功済みだが、ここで save に失敗すると新トークンが
+    // ディスクに残らない。authorization code は使い捨てで再利用できないため、
+    // 再度 `auth nightbot` をやり直す必要がある旨を明示する (素の伝播だと原因が分かりにくい)。
+    store.save(account).map_err(|e| {
+        format!(
+            "Nightbot: 認証は成功しましたが credentials 保存に失敗しました ({e})。トークンは永続化されていません。`auth nightbot --account {account}` をやり直してください"
+        )
+    })?;
     println!("Nightbot の認証情報を保存しました (account={account})");
     Ok(())
 }
