@@ -85,9 +85,10 @@ impl Credentials {
             })?;
         let lock = CredentialsLock { file: lock_file };
 
-        // 前回 SIGKILL や電源断で取り残された credentials-{account}.toml.* tmp を掃除。
+        // 前回 SIGKILL や電源断で取り残された tmp (credentials-{account}.toml.tmp.*) を掃除。
         // lock を取った後に走らせるので他プロセスの書きかけは存在しないと仮定する。
-        let prefix = format!("{}.", Self::file_name(account));
+        // `.tmp.` 固定 infix に限定し、ユーザーの手動バックアップ (例 .toml.bak) を巻き添えにしない。
+        let prefix = format!("{}.tmp.", Self::file_name(account));
         match std::fs::read_dir(dir) {
             Ok(entries) => {
                 for entry in entries.flatten() {
@@ -133,7 +134,7 @@ impl Credentials {
         let content = toml::to_string_pretty(self)?;
 
         let mut tmp = tempfile::Builder::new()
-            .prefix(&format!("{}.", Self::file_name(account)))
+            .prefix(&format!("{}.tmp.", Self::file_name(account)))
             .tempfile_in(dir)
             .map_err(|e| CredentialsError::Io(dir.display().to_string(), e))?;
         tmp.as_file_mut()
@@ -266,12 +267,23 @@ mod tests {
     #[test]
     fn startup_cleanup_removes_leftover_tmp() {
         let tmp = tempfile::tempdir().unwrap();
-        // 残骸 tmp を仕込む
-        let leftover = tmp.path().join("credentials-default.toml.dead");
+        // 残骸 tmp を仕込む (save が使う .tmp. infix と同じ命名)
+        let leftover = tmp.path().join("credentials-default.toml.tmp.dead");
         std::fs::write(&leftover, b"junk").unwrap();
         assert!(leftover.exists());
 
         let (_, _lock) = Credentials::load_locked_in(tmp.path(), "default").unwrap();
         assert!(!leftover.exists(), "tmp 残骸が掃除されていない");
+    }
+
+    #[test]
+    fn startup_cleanup_keeps_user_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 手動バックアップ (.tmp. infix を含まない) は掃除対象外。
+        let backup = tmp.path().join("credentials-default.toml.bak");
+        std::fs::write(&backup, b"backup").unwrap();
+
+        let (_, _lock) = Credentials::load_locked_in(tmp.path(), "default").unwrap();
+        assert!(backup.exists(), "ユーザーのバックアップを巻き添えにした");
     }
 }
