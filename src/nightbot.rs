@@ -137,18 +137,19 @@ const REDACT_KEYS: &[&str] = &[
 
 /// レスポンス本文の機密フィールドを潰すヘルパ。常時 redact してから error/parse 系の
 /// エラーバリアントに詰める。token endpoint の本文は JSON 前提なので主経路は
-/// `redact_value` (ネスト含め網羅)。JSON パースに失敗した本文だけがフォールバックに回り、
-/// そちらは `"key":"value"` のクォート文字列形式のみ対応する (フォーム/クエリ形式や
-/// クォート無し値は対象外)。
+/// `redact_value` (ネスト含め網羅)。JSON パースに失敗した本文はフォールバックに回り、
+/// `"key":"value"` のクォート形式に加え `key=value` のフォーム/クエリ形式も潰す
+/// (プロキシ介在等で本文が form-encoded で返るケースの漏洩防御)。
 fn redact_token_body(body: &str) -> String {
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(body) {
         redact_value(&mut v);
         return serde_json::to_string(&v).unwrap_or_else(|_| "<redact fallback>".to_string());
     }
-    // fallback: JSON でなくても "key":"..." / "key": "..." 形式を文字列ベースで潰す
+    // fallback: JSON でなくても "key":"..." / "key": "..." と key=value の両形式を潰す
     let mut s = body.to_string();
     for key in REDACT_KEYS {
         s = redact_key_in_string(&s, key);
+        s = redact_form_key_in_string(&s, key);
     }
     s
 }
@@ -203,6 +204,35 @@ fn redact_key_in_string(s: &str, key: &str) -> String {
         }
         // パターンに合わなければそのまま流す (false positive を避ける)
         rest = after_key;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `key=value` 形式 (form-encoded / クエリ文字列) の value を `REDACTED` に置換する。
+/// JSON パース失敗時のフォールバック専用。`key` 直前が区切り (先頭 / `&` / `?` / 空白) の
+/// ときだけ一致させ、`my_access_token=` のような部分一致での誤爆を避ける。value は
+/// `&` / 空白 / 行末で終端する。
+fn redact_form_key_in_string(s: &str, key: &str) -> String {
+    let needle = format!("{key}=");
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(idx) = rest.find(&needle) {
+        // key 直前が区切りでなければ部分一致なのでスキップ (誤爆回避)。
+        let boundary_ok = idx == 0
+            || matches!(rest.as_bytes()[idx - 1], b'&' | b'?' | b' ' | b'\t' | b'\n' | b'\r');
+        out.push_str(&rest[..idx]);
+        out.push_str(&needle);
+        let after_eq = &rest[idx + needle.len()..];
+        if boundary_ok {
+            let end = after_eq
+                .find(|c: char| c == '&' || c.is_whitespace())
+                .unwrap_or(after_eq.len());
+            out.push_str("REDACTED");
+            rest = &after_eq[end..];
+        } else {
+            rest = after_eq;
+        }
     }
     out.push_str(rest);
     out
@@ -714,6 +744,18 @@ mod tests {
         let red = redact_token_body(body);
         assert!(!red.contains("leaked-rt"), "spaced fallback failed: {red}");
         assert!(red.contains("REDACTED"));
+    }
+
+    #[test]
+    fn redact_token_body_handles_form_encoded_fallback() {
+        // プロキシ介在等で本文が form-encoded で返るケース。& / 行末で終端する。
+        let body = "error=invalid&access_token=leaked-at&token_type=bearer";
+        let red = redact_token_body(body);
+        assert!(!red.contains("leaked-at"), "form fallback failed: {red}");
+        assert!(red.contains("access_token=REDACTED"));
+        // 区切りでない部分一致 (my_access_token=) は誤爆させない。
+        let body2 = "my_access_token=keepme";
+        assert!(redact_token_body(body2).contains("keepme"));
     }
 
     #[test]
