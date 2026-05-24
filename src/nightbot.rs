@@ -509,6 +509,14 @@ fn run_callback_server(
                 )));
             }
         };
+        // OAuth リダイレクトは GET 固定。POST/HEAD 等は受理せず 405 で弾く
+        // (state CSRF 防御に加え、メソッドも絞って受理面を最小化する)。
+        if *req.method() != tiny_http::Method::Get {
+            let _ = req.respond(
+                tiny_http::Response::from_string("method not allowed").with_status_code(405),
+            );
+            continue;
+        }
         let url = req.url().to_string();
         let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
         if path != "/callback" {
