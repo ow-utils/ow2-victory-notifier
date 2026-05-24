@@ -40,6 +40,10 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 /// Nightbot 仕様: /1/channel/send は 400 文字までを受け付ける。
+/// カウント単位は Unicode scalar value (Rust の `chars().count()`) を前提とする。
+/// Nightbot 側が UTF-16 code unit / grapheme cluster で数えている場合、絵文字や結合文字を
+/// 含む文面で本ツールの判定と乖離し得るが、本ツールは絵文字を含まない定型文を想定しており
+/// 実害は無い。乖離が観測されたらここのカウント単位を Nightbot 側に合わせる。
 pub(crate) const MESSAGE_MAX_CHARS: usize = 400;
 /// access_token 残り時間が これ以下になったら refresh する (秒)。
 const REFRESH_MARGIN_SECS: u64 = 60;
