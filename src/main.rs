@@ -219,10 +219,12 @@ async fn cmd_check(
     }
 
     let Some(creds) = credentials.nightbot.as_mut() else {
-        println!(
-            "  Nightbot: 認証情報なし (`auth nightbot --account {account}` を実行)"
-        );
-        return Ok(());
+        // Nightbot 一本化後は投稿経路がこれのみのため、認証情報なしは設定不備。
+        // systemd/cron の健全性確認で成功扱いされないよう非ゼロ終了させる (run と方針統一)。
+        return Err(format!(
+            "Nightbot: 認証情報なし。`auth nightbot --account {account}` を実行してください"
+        )
+        .into());
     };
 
     // expires_at から残時間を表示

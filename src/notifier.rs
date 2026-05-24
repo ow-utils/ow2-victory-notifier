@@ -28,6 +28,16 @@ pub async fn run(
     // SSE ループに入る前に弾く。
     validate_message_lengths(&config.messages)?;
 
+    // Nightbot 一本化後は投稿経路がこれのみ。credentials が無いまま SSE ループに入ると
+    // 毎イベント warn を出すだけで永久に投稿できず、しかも account lock を保持し続けるため
+    // 同 account の `auth nightbot` も lock 競合で実行できない (サイレントな無機能状態)。
+    // validate_message_lengths と同様にループ突入前に弾いて非ゼロ終了させる。
+    if credentials.nightbot.is_none() {
+        return Err(NotifierError::NoCredentials {
+            account: account.to_string(),
+        });
+    }
+
     // lock のライフタイムを通知ループ全体に明示的にバインドする。Drop されると
     // flock が解放されて二重起動防止が崩れるため、関数終了まで保持し続ける。
     let _lock = lock;
@@ -194,6 +204,8 @@ pub enum NotifierError {
         #[source]
         source: NightbotError,
     },
+    #[error("Nightbot 認証情報がありません (account={account})。`auth nightbot --account {account}` を実行してください")]
+    NoCredentials { account: String },
     #[error("messages.{outcome} の文面がテンプレート展開後 {len} 文字で Nightbot の上限 {max} 文字を超えています。config.toml を見直してください")]
     MessageTooLong {
         outcome: String,
