@@ -156,8 +156,11 @@ async fn auth_nightbot(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_file(config_path)?;
     let callback_port = config.nightbot.callback_port;
-    let creds = nightbot::authenticate(client_id, client_secret, callback_port).await?;
+    // OAuth フローの前に lock を取る。authenticate() は最大 5 分のブラウザ承認 + token
+    // 交換を行うため、これを完了させてから lock 競合で弾くとユーザの承認操作と発行済み
+    // authorization code (使い捨て) が無駄になる。同一 account の二重 auth も検出可能。
     let (mut store, _lock) = Credentials::load_locked(account)?;
+    let creds = nightbot::authenticate(client_id, client_secret, callback_port).await?;
     store.set_nightbot(creds);
     store.save(account)?;
     println!("Nightbot の認証情報を保存しました (account={account})");
