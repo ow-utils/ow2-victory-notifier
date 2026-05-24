@@ -227,8 +227,12 @@ async fn cmd_check(
                 true
             }
             Err(e) => {
-                println!("  Nightbot: refresh 失敗: {}", e);
-                return Ok(());
+                // --force-refresh は refresh_token 延命を目的とするため、失敗を成功扱いに
+                // せず非ゼロ終了させる (cron/systemd や手順確認での誤認防止)。
+                return Err(format!(
+                    "Nightbot: --force-refresh の refresh 失敗 ({e})。`auth nightbot --account {account}` で再認証してください"
+                )
+                .into());
             }
         }
     } else {
@@ -242,6 +246,14 @@ async fn cmd_check(
                 false
             }
             Err(e) => {
+                // 通常の check は疎通確認なので一過性エラーでは継続するが、再認証必須
+                // (refresh_token 失効等) は成功終了させず明示する。
+                if e.is_terminal() {
+                    return Err(format!(
+                        "Nightbot: 再認証が必要です ({e})。`auth nightbot --account {account}` を実行してください"
+                    )
+                    .into());
+                }
                 println!("  Nightbot: refresh 失敗: {}", e);
                 return Ok(());
             }
