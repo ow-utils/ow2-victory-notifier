@@ -40,7 +40,7 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 /// Nightbot 仕様: /1/channel/send は 400 文字までを受け付ける。
-const MESSAGE_MAX_CHARS: usize = 400;
+pub(crate) const MESSAGE_MAX_CHARS: usize = 400;
 /// access_token 残り時間が これ以下になったら refresh する (秒)。
 const REFRESH_MARGIN_SECS: u64 = 60;
 /// 429 リトライ時のフォールバック待機 (Nightbot は 5 秒に 1 リクエスト)。
@@ -415,6 +415,29 @@ struct ChannelObject {
     name: Option<String>,
 }
 
+/// `Retry-After` ヘッダを秒として取り出す (数値形式のみ。HTTP-date 形式は対象外)。
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// 非成功レスポンス本文を `HttpStatus` に変換する共通処理。本文は常時 redact し、
+/// raw_body と error/description の派生元を同一の redact 済み本文に揃える
+/// (description は Display に出るため secret echo 防御を一貫させる)。
+fn http_status_error(status: u16, retry_after_secs: Option<u64>, body: &str) -> NightbotError {
+    let recorded = redact_token_body(body);
+    let err: ErrorBody = serde_json::from_str(&recorded).unwrap_or_default();
+    NightbotError::HttpStatus {
+        status,
+        error: err.error,
+        description: err.error_description.or(err.message),
+        raw_body: recorded,
+        retry_after_secs,
+    }
+}
+
 /// 共通 HTTP 処理 (成功時は JSON body を T にパース)。エラー本文は常時 redact してから
 /// `HttpStatus` / `ResponseParse` に詰める (Nightbot 仕様変更で token がエコーされるリスクを
 /// defense-in-depth で潰す)。
@@ -423,11 +446,7 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
 ) -> Result<T, NightbotError> {
     let resp = req.send().await?;
     let status = resp.status();
-    let retry_after = resp
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+    let retry_after = parse_retry_after(resp.headers());
     let body = resp.text().await?;
     if status.is_success() {
         // 成功時は redact 計算を省く (正常系のホットパスで毎回 JSON 再シリアライズしない)。
@@ -437,17 +456,7 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
             source,
         })
     } else {
-        let recorded = redact_token_body(&body);
-        // error/description も redact 済み本文から取り出し、raw_body と派生元を揃える
-        // (description は Display に出るため secret echo への防御を一貫させる)。
-        let err: ErrorBody = serde_json::from_str(&recorded).unwrap_or_default();
-        Err(NightbotError::HttpStatus {
-            status: status.as_u16(),
-            error: err.error,
-            description: err.error_description.or(err.message),
-            raw_body: recorded,
-            retry_after_secs: retry_after,
-        })
+        Err(http_status_error(status.as_u16(), retry_after, &body))
     }
 }
 
@@ -456,24 +465,12 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
 async fn fetch_no_body(req: reqwest::RequestBuilder) -> Result<(), NightbotError> {
     let resp = req.send().await?;
     let status = resp.status();
-    let retry_after = resp
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+    let retry_after = parse_retry_after(resp.headers());
     let body = resp.text().await?;
     if status.is_success() {
         Ok(())
     } else {
-        let recorded = redact_token_body(&body);
-        let err: ErrorBody = serde_json::from_str(&recorded).unwrap_or_default();
-        Err(NightbotError::HttpStatus {
-            status: status.as_u16(),
-            error: err.error,
-            description: err.error_description.or(err.message),
-            raw_body: recorded,
-            retry_after_secs: retry_after,
-        })
+        Err(http_status_error(status.as_u16(), retry_after, &body))
     }
 }
 
@@ -630,30 +627,17 @@ fn parse_query(query: &str) -> HashMap<String, String> {
 
 async fn parse_token_response(resp: reqwest::Response) -> Result<TokenResponse, NightbotError> {
     let status = resp.status();
-    let retry_after = resp
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+    let retry_after = parse_retry_after(resp.headers());
     let body = resp.text().await?;
-    let redacted = redact_token_body(&body);
     if status.is_success() {
         serde_json::from_str::<TokenResponse>(&body).map_err(|source| {
             NightbotError::ResponseParse {
-                body: redacted,
+                body: redact_token_body(&body),
                 source,
             }
         })
     } else {
-        // raw_body (redacted) と error/description の派生元を揃える。
-        let err: ErrorBody = serde_json::from_str(&redacted).unwrap_or_default();
-        Err(NightbotError::HttpStatus {
-            status: status.as_u16(),
-            error: err.error,
-            description: err.error_description.or(err.message),
-            raw_body: redacted,
-            retry_after_secs: retry_after,
-        })
+        Err(http_status_error(status.as_u16(), retry_after, &body))
     }
 }
 
