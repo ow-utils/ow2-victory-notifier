@@ -99,7 +99,12 @@ impl NightbotError {
             NightbotError::HttpStatus { error: Some(e), .. } => {
                 matches!(
                     e.as_str(),
-                    "invalid_grant" | "invalid_client" | "unauthorized_client"
+                    "invalid_grant"
+                        | "invalid_client"
+                        | "unauthorized_client"
+                        // send_message / get_channel での access_token 失効
+                        // (Nightbot 側で revoke されたケース)。再試行で復旧しないため終了。
+                        | "invalid_token"
                 )
             }
             NightbotError::InsufficientScope { .. } => true,

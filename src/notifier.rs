@@ -3,12 +3,16 @@ use crate::credentials::{Credentials, CredentialsError, CredentialsLock, Nightbo
 use crate::nightbot::{self, NightbotError};
 use crate::sse;
 use futures::StreamExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 /// SSE ストリーム終了時の再接続バックオフ初期値。失敗のたび倍にして上限で頭打ち。
 const SSE_RECONNECT_INITIAL: Duration = Duration::from_secs(1);
 const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
+/// 1 セッションがこの時間以上維持できたら「健全な接続だった」とみなしてバックオフをリセット。
+/// 短期間に複数回切断 → 60 秒まで肥大 → その後安定稼働、というケースで次回再接続が
+/// 不必要に遅延し続けるのを防ぐ。
+const SSE_HEALTHY_DURATION: Duration = Duration::from_secs(60);
 
 /// 通知ループ。Nightbot 経由でライブチャットに勝敗を投稿する。
 /// eventsource-client は内部再接続を行うが、まれにストリーム自体が終了するため
@@ -25,8 +29,17 @@ pub async fn run(
     let _lock = lock;
     let mut backoff = SSE_RECONNECT_INITIAL;
     loop {
+        let started = Instant::now();
         match run_once(&config, &mut credentials, account).await {
             Ok(()) => {
+                let lifetime = started.elapsed();
+                if lifetime >= SSE_HEALTHY_DURATION {
+                    info!(
+                        "SSE セッションが {} 秒維持できたためバックオフをリセットします",
+                        lifetime.as_secs()
+                    );
+                    backoff = SSE_RECONNECT_INITIAL;
+                }
                 warn!(
                     "SSE ストリームが終了しました。{} 秒後に再接続します",
                     backoff.as_secs()
@@ -122,7 +135,16 @@ async fn run_once(
             .expect("nightbot creds were Some above and refresh does not unset");
         match nightbot::send_message(creds_ref, &text).await {
             Ok(()) => info!("Nightbot 投稿成功"),
-            Err(e) => warn!("Nightbot 投稿失敗: {}", e),
+            Err(e) if e.is_terminal() => {
+                error!(
+                    "Nightbot 投稿が再試行不能なエラー ({e})。`auth nightbot --account {account}` で再認証してください"
+                );
+                return Err(NotifierError::TerminalAuth {
+                    account: account.to_string(),
+                    source: e,
+                });
+            }
+            Err(e) => warn!("Nightbot 投稿失敗 (継続): {}", e),
         }
     }
 
