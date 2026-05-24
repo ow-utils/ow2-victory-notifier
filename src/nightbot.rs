@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
@@ -16,6 +17,25 @@ const CALLBACK_DEADLINE: Duration = Duration::from_secs(300);
 const RECV_POLL: Duration = Duration::from_millis(250);
 
 const REQUIRED_SCOPES: &[&str] = &["channel", "channel_send"];
+
+/// HTTP リクエスト全体のタイムアウト。Nightbot 側が応答を返さないとき SSE ループ全体が
+/// 無期限ブロックされて以降の通知が止まるのを防ぐ。
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// TCP/TLS 接続確立までのタイムアウト。
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// プロセス共有の reqwest クライアント。毎回 new するとコネクションプール / TLS セットアップを
+/// 取り直すコストが乗るため、タイムアウト付きの共有 instance を使う。
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .build()
+            .expect("reqwest クライアントの初期化に失敗")
+    })
+}
 
 /// Nightbot 仕様: /1/channel/send は 400 文字までを受け付ける。
 const MESSAGE_MAX_CHARS: usize = 400;
@@ -73,42 +93,82 @@ pub(crate) fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// token endpoint (POST /oauth2/token) のレスポンス本文を `ResponseParse` / `HttpStatus`
-/// に詰める前に通すヘルパ。`access_token` / `refresh_token` の値を `REDACTED` に置換する。
+/// 機密キーを `REDACTED` に置換するキーリスト。レスポンス本文を `ResponseParse` /
+/// `HttpStatus` に詰める前に必ず通す (Nightbot は通常応答に含めないが、エラー時に
+/// `error_description` や echo 形式で混入するケースを防御する)。
+const REDACT_KEYS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "code",
+    "client_secret",
+    "id_token",
+];
+
+/// レスポンス本文の機密フィールドを潰すヘルパ。常時 redact してから error/parse 系の
+/// エラーバリアントに詰める。
 fn redact_token_body(body: &str) -> String {
-    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(body)
-        && let Some(obj) = v.as_object_mut()
-    {
-        for key in ["access_token", "refresh_token"] {
-            if obj.contains_key(key) {
-                obj[key] = serde_json::Value::String("REDACTED".to_string());
-            }
-        }
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(body) {
+        redact_value(&mut v);
         return serde_json::to_string(&v).unwrap_or_else(|_| "<redact fallback>".to_string());
     }
-    // fallback: JSON でなくても "access_token":"..." 形式を文字列ベースで潰す
+    // fallback: JSON でなくても "key":"..." / "key": "..." 形式を文字列ベースで潰す
     let mut s = body.to_string();
-    for key in ["access_token", "refresh_token"] {
+    for key in REDACT_KEYS {
         s = redact_key_in_string(&s, key);
     }
     s
 }
 
+fn redact_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(obj) => {
+            for (k, val) in obj.iter_mut() {
+                if REDACT_KEYS.contains(&k.as_str()) {
+                    *val = serde_json::Value::String("REDACTED".to_string());
+                } else {
+                    redact_value(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                redact_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `"key"<spaces>:<spaces>"value"` 形式の value を `REDACTED` に置換する。
+/// JSON パース失敗時のフォールバック専用。`"key":"..."` と `"key": "..."` の両方を吸う。
 fn redact_key_in_string(s: &str, key: &str) -> String {
-    let needle = format!("\"{key}\":\"");
+    let opener = format!("\"{key}\"");
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(idx) = rest.find(&needle) {
+    while let Some(idx) = rest.find(&opener) {
         out.push_str(&rest[..idx]);
-        out.push_str(&needle);
-        out.push_str("REDACTED");
-        rest = &rest[idx + needle.len()..];
-        if let Some(end) = rest.find('"') {
-            out.push('"');
-            rest = &rest[end + 1..];
-        } else {
-            break;
+        out.push_str(&opener);
+        let after_key = &rest[idx + opener.len()..];
+        let after_ws = after_key.trim_start();
+        let ws_len = after_key.len() - after_ws.len();
+        if let Some(after_colon) = after_ws.strip_prefix(':') {
+            let value_start = after_colon.trim_start();
+            let colon_ws = after_colon.len() - value_start.len();
+            if let Some(after_quote) = value_start.strip_prefix('"')
+                && let Some(end) = after_quote.find('"')
+            {
+                out.push_str(&after_key[..ws_len]);
+                out.push(':');
+                out.push_str(&after_colon[..colon_ws]);
+                out.push('"');
+                out.push_str("REDACTED");
+                out.push('"');
+                rest = &after_quote[end + 1..];
+                continue;
+            }
         }
+        // パターンに合わなければそのまま流す (false positive を避ける)
+        rest = after_key;
     }
     out.push_str(rest);
     out
@@ -170,8 +230,7 @@ pub async fn authenticate(
 
     // 4. token endpoint で code をトークンに交換
     let redirect_uri = format!("http://127.0.0.1:{callback_port}/callback");
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = http_client()
         .post(TOKEN_URL)
         .form(&[
             ("grant_type", "authorization_code"),
@@ -226,8 +285,7 @@ pub async fn ensure_fresh_token(creds: &mut NightbotCreds) -> Result<bool, Night
 /// `creds.callback_port` (authenticate 時に保存した値) を使う。
 pub async fn refresh(creds: &mut NightbotCreds) -> Result<(), NightbotError> {
     let redirect_uri = format!("http://127.0.0.1:{}/callback", creds.callback_port);
-    let client = reqwest::Client::new();
-    let req = client.post(TOKEN_URL).form(&[
+    let req = http_client().post(TOKEN_URL).form(&[
         ("grant_type", "refresh_token"),
         ("refresh_token", creds.refresh_token.as_str()),
         ("redirect_uri", redirect_uri.as_str()),
@@ -245,9 +303,8 @@ pub async fn refresh(creds: &mut NightbotCreds) -> Result<(), NightbotError> {
 
 /// 取得済み Bearer トークンで現在 join 中の channel 情報を返す。
 pub async fn get_channel(creds: &NightbotCreds) -> Result<ChannelInfo, NightbotError> {
-    let client = reqwest::Client::new();
-    let req = client.get(CHANNEL_URL).bearer_auth(&creds.access_token);
-    let resp: ChannelResponse = fetch_json(req, false).await?;
+    let req = http_client().get(CHANNEL_URL).bearer_auth(&creds.access_token);
+    let resp: ChannelResponse = fetch_json(req).await?;
     Ok(ChannelInfo {
         joined: resp.channel.joined,
         provider: resp.channel.provider,
@@ -264,12 +321,11 @@ pub async fn send_message(creds: &NightbotCreds, message: &str) -> Result<(), Ni
         return Err(NightbotError::MessageTooLong { len: char_count });
     }
     let attempt = || async {
-        let client = reqwest::Client::new();
-        let req = client
+        let req = http_client()
             .post(CHANNEL_SEND_URL)
             .bearer_auth(&creds.access_token)
             .json(&serde_json::json!({ "message": message }));
-        fetch_no_body(req, false).await
+        fetch_no_body(req).await
     };
     match attempt().await {
         Ok(()) => Ok(()),
@@ -311,11 +367,11 @@ struct ChannelObject {
     name: Option<String>,
 }
 
-/// 共通 HTTP 処理 (成功時は JSON body を T にパース)。token endpoint からの呼び出しでは
-/// `redact = true` を渡してエラー本文に access_token / refresh_token を残さない。
+/// 共通 HTTP 処理 (成功時は JSON body を T にパース)。エラー本文は常時 redact してから
+/// `HttpStatus` / `ResponseParse` に詰める (Nightbot 仕様変更で token がエコーされるリスクを
+/// defense-in-depth で潰す)。
 async fn fetch_json<T: serde::de::DeserializeOwned>(
     req: reqwest::RequestBuilder,
-    redact: bool,
 ) -> Result<T, NightbotError> {
     let resp = req.send().await?;
     let status = resp.status();
@@ -325,7 +381,7 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
     let body = resp.text().await?;
-    let recorded = if redact { redact_token_body(&body) } else { body.clone() };
+    let recorded = redact_token_body(&body);
     if status.is_success() {
         serde_json::from_str::<T>(&body).map_err(|source| NightbotError::ResponseParse {
             body: recorded,
@@ -344,10 +400,8 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(
 }
 
 /// 成功 body を捨てる版。/1/channel/send で使う (Nightbot は ack を返すだけ)。
-async fn fetch_no_body(
-    req: reqwest::RequestBuilder,
-    redact: bool,
-) -> Result<(), NightbotError> {
+/// エラー本文は常時 redact。
+async fn fetch_no_body(req: reqwest::RequestBuilder) -> Result<(), NightbotError> {
     let resp = req.send().await?;
     let status = resp.status();
     let retry_after = resp
@@ -359,7 +413,7 @@ async fn fetch_no_body(
     if status.is_success() {
         Ok(())
     } else {
-        let recorded = if redact { redact_token_body(&body) } else { body };
+        let recorded = redact_token_body(&body);
         let err: ErrorBody = serde_json::from_str(&recorded).unwrap_or_default();
         Err(NightbotError::HttpStatus {
             status: status.as_u16(),
@@ -586,6 +640,35 @@ mod tests {
         let body = r#"oops "access_token":"leaked" trailing"#;
         let red = redact_token_body(body);
         assert!(!red.contains("leaked"));
+        assert!(red.contains("REDACTED"));
+    }
+
+    #[test]
+    fn redact_token_body_handles_spaced_json_fallback() {
+        // パースが通らない壊れた JSON でも "key": "value" 形式 (コロン後スペース) を吸う
+        let body = r#"junk "refresh_token": "leaked-rt" trailing"#;
+        let red = redact_token_body(body);
+        assert!(!red.contains("leaked-rt"), "spaced fallback failed: {red}");
+        assert!(red.contains("REDACTED"));
+    }
+
+    #[test]
+    fn redact_token_body_redacts_extra_keys() {
+        let body = r#"{"code":"abc","client_secret":"shh","id_token":"jwt","other":"keep"}"#;
+        let red = redact_token_body(body);
+        assert!(!red.contains("abc"));
+        assert!(!red.contains("shh"));
+        assert!(!red.contains("jwt"));
+        assert!(red.contains("keep"));
+    }
+
+    #[test]
+    fn redact_token_body_walks_nested_objects() {
+        let body =
+            r#"{"data":{"access_token":"deep-leak","nested":{"refresh_token":"deeper"}},"ok":1}"#;
+        let red = redact_token_body(body);
+        assert!(!red.contains("deep-leak"));
+        assert!(!red.contains("deeper"));
         assert!(red.contains("REDACTED"));
     }
 }
