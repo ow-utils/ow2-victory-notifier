@@ -54,7 +54,7 @@ cargo run -- auth nightbot --account twitch \
     --client-secret-env NIGHTBOT_CLIENT_SECRET
 ```
 
-表示された URL をブラウザで開き、Nightbot の承認画面で `channel` と `channel_send` の 2 スコープを許可します。
+表示された URL をブラウザで開き、Nightbot の承認画面で `channel` と `channel_send` の 2 スコープを許可します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
 
 `--client-secret <SECRET>` で直接渡すこともできますが、シェル履歴と `ps` に残るため非推奨です (試験用途のみ)。
 
@@ -63,6 +63,8 @@ cargo run -- auth nightbot --account twitch \
 ```sh
 cargo run -- run --account twitch
 ```
+
+`ow2-victory-counter` が一時的に落ちて SSE が切れても、本ツールは内部でバックオフ付き (1 秒から最大 60 秒) で再接続を試み続けます。再認証必須エラー (`invalid_grant` / `invalid_client` / スコープ不足) を踏んだ場合のみ非ゼロ終了するため、systemd 等で再起動だけでは復旧しません — その場合は `auth nightbot --account <name>` をやり直してください。
 
 ## 両プラットフォーム同時運用
 
@@ -98,6 +100,21 @@ Unix ではファイルパーミッションを `0o600` に設定します。Win
 - Nightbot 側の障害 (API ダウン / レート制限)
 - アカウント停止 / Join 解除
 - Nightbot 側 OAuth アプリの設定変更 (Redirect URI の不一致など)
+
+### client_secret を rotate したときの再認証
+
+Nightbot OAuth Applications 画面で client_secret を rotate (再発行) した場合、ディスク上の `credentials-{account}.toml` に記録されているのは **rotate 前の旧 secret** です。access_token が生きている間は `send_message` / `get_channel` は Bearer 認証で動き続けるため気付きませんが、初回の `refresh` 試行時に Nightbot 側から `invalid_client` が返って通知ループが終了します (本ツールは `is_terminal()` で再認証必須を検出します)。
+
+rotate 直後に必ず以下を実行してください:
+
+```sh
+export NIGHTBOT_CLIENT_SECRET='<新しい Client Secret>'
+cargo run -- auth nightbot --account <name> \
+    --client-id <Client ID> \
+    --client-secret-env NIGHTBOT_CLIENT_SECRET
+```
+
+`auth nightbot` は credentials を上書きするため、新 secret が `credentials-{account}.toml` に書き込まれて以降の refresh が成功するようになります。
 
 ### refresh_token の失効と延命
 
