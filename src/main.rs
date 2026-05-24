@@ -305,7 +305,17 @@ async fn cmd_check(
                 );
             }
         }
-        Err(e) => println!("  Nightbot get_channel 失敗: {}", e),
+        // check は「SSE + Nightbot API + Join 状態」の疎通確認コマンド。get_channel 失敗
+        // (token 失効・scope 不足・API 疎通不可) を成功終了させると健全性確認が無意味に
+        // なるため、refresh 経路と同様に非ゼロ終了させる。
+        Err(e) => {
+            let hint = if e.is_terminal() {
+                format!("。`auth nightbot --account {account}` で再認証してください")
+            } else {
+                String::new()
+            };
+            return Err(format!("Nightbot get_channel 失敗: {e}{hint}").into());
+        }
     }
 
     Ok(())
