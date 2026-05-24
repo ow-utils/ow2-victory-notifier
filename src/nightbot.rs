@@ -136,7 +136,10 @@ const REDACT_KEYS: &[&str] = &[
 ];
 
 /// レスポンス本文の機密フィールドを潰すヘルパ。常時 redact してから error/parse 系の
-/// エラーバリアントに詰める。
+/// エラーバリアントに詰める。token endpoint の本文は JSON 前提なので主経路は
+/// `redact_value` (ネスト含め網羅)。JSON パースに失敗した本文だけがフォールバックに回り、
+/// そちらは `"key":"value"` のクォート文字列形式のみ対応する (フォーム/クエリ形式や
+/// クォート無し値は対象外)。
 fn redact_token_body(body: &str) -> String {
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(body) {
         redact_value(&mut v);
@@ -327,8 +330,12 @@ pub async fn ensure_fresh_token(creds: &mut NightbotCreds) -> Result<bool, Night
 }
 
 /// refresh_token を使って access_token を更新する。Nightbot は rotation するため
-/// 新 refresh_token も同時に保存する。redirect_uri は authorize 時の値と一致必須なため
-/// `creds.callback_port` (authenticate 時に保存した値) を使う。
+/// 新 refresh_token も同時に保存する。
+///
+/// redirect_uri は RFC6749 §6 の refresh_token grant では本来不要だが、Nightbot の API
+/// リファレンス (https://api-docs.nightbot.tv/) は refresh でも redirect_uri を必須と明記して
+/// おり、登録済み redirect URI のいずれかと一致させる必要がある。よって authenticate 時の
+/// `creds.callback_port` を永続化し、authorize / refresh で同一の値を送る。
 pub async fn refresh(creds: &mut NightbotCreds) -> Result<(), NightbotError> {
     let redirect_uri = format!("http://127.0.0.1:{}/callback", creds.callback_port);
     let req = http_client().post(TOKEN_URL).form(&[
