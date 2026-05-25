@@ -17,6 +17,11 @@ const CHANNEL_SEND_URL: &str = "https://api.nightbot.tv/1/channel/send";
 
 const CALLBACK_DEADLINE: Duration = Duration::from_secs(300);
 const RECV_POLL: Duration = Duration::from_millis(250);
+/// callback サーバが拒否 (state 不一致 / malformed / 非 GET / 想定外パス) を返した回数の上限。
+/// deadline と Ctrl+C でも終端するが、ローカルプロセスからの大量リクエストで deadline まで
+/// CPU を浪費し続けるのを避けるため、正常な 1 リクエストで完了する前提に対し十分な余裕を
+/// 持たせた上で頭打ちにする。
+const CALLBACK_MAX_REJECTS: u32 = 50;
 
 const REQUIRED_SCOPES: &[&str] = &["channel", "channel_send"];
 
@@ -59,6 +64,8 @@ pub enum NightbotError {
     },
     #[error("OAuth コールバックがタイムアウトしました。`auth nightbot` を再実行してください")]
     CallbackTimeout,
+    #[error("OAuth コールバックの拒否リクエストが上限 ({0}) に達しました。ローカルポートに想定外のリクエストが集中していないか確認のうえ `auth nightbot` を再実行してください")]
+    CallbackTooManyRejects(u32),
     #[error("OAuth コールバック待機中に Ctrl+C で中断されました")]
     CallbackAborted,
     #[error("OAuth コールバック処理スレッドが落ちました: {0}")]
@@ -532,9 +539,13 @@ fn run_callback_server(
     })?;
 
     let deadline = Instant::now() + CALLBACK_DEADLINE;
+    let mut rejected: u32 = 0;
     loop {
         if abort.load(Ordering::SeqCst) {
             return Err(NightbotError::CallbackAborted);
+        }
+        if rejected >= CALLBACK_MAX_REJECTS {
+            return Err(NightbotError::CallbackTooManyRejects(CALLBACK_MAX_REJECTS));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -556,6 +567,7 @@ fn run_callback_server(
             let _ = req.respond(
                 tiny_http::Response::from_string("method not allowed").with_status_code(405),
             );
+            rejected += 1;
             continue;
         }
         let url = req.url().to_string();
@@ -564,6 +576,7 @@ fn run_callback_server(
             // /favicon.ico などの誤受信は 404 で返して継続。
             let _ = req
                 .respond(tiny_http::Response::from_string("not found").with_status_code(404));
+            rejected += 1;
             continue;
         }
 
@@ -589,6 +602,7 @@ fn run_callback_server(
                 );
                 let _ = req
                     .respond(tiny_http::Response::from_string("ignored").with_status_code(400));
+                rejected += 1;
                 continue;
             }
             let error_kind = params.get("error").cloned().unwrap_or_default();
@@ -619,6 +633,7 @@ fn run_callback_server(
                 );
                 let _ = req
                     .respond(tiny_http::Response::from_string("ignored").with_status_code(400));
+                rejected += 1;
                 continue;
             }
             let code = params.get("code").cloned().unwrap_or_default();
@@ -631,6 +646,7 @@ fn run_callback_server(
 
         warn!("ignoring malformed /callback (no code/error)");
         let _ = req.respond(tiny_http::Response::from_string("ignored").with_status_code(400));
+        rejected += 1;
     }
 }
 
