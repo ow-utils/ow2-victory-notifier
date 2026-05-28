@@ -1,0 +1,86 @@
+name: 配布パッケージ生成
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Windows配布ビルド
+    runs-on: windows-latest
+
+    steps:
+      - name: リポジトリーをチェックアウト
+        uses: actions/checkout@v4
+
+      - name: Rustツールチェーンをセットアップ
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargoビルドキャッシュを有効化
+        uses: swatinem/rust-cache@v2
+        with:
+          shared-key: windows-stable
+          cache-targets: true
+          cache-all-crates: true
+
+      - name: リリースビルドを実行
+        run: cargo build --release --locked
+
+      - name: 配布フォルダーを作成
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $distRoot = Join-Path (Resolve-Path ".") "dist"
+          $packageRoot = Join-Path $distRoot "ow2-victory-notifier"
+
+          if (Test-Path $packageRoot) {
+            Remove-Item $packageRoot -Recurse -Force
+          }
+          if (-not (Test-Path $distRoot)) {
+            New-Item -ItemType Directory -Path $distRoot | Out-Null
+          }
+          New-Item -ItemType Directory -Path $packageRoot | Out-Null
+
+          Copy-Item "target/release/ow2-victory-notifier.exe" $packageRoot -Force
+
+          Copy-Item "config.example.toml" (Join-Path $packageRoot "config.example.toml") -Force
+          Copy-Item "README.md" (Join-Path $packageRoot "README.md") -Force
+          Copy-Item "LICENSE" (Join-Path $packageRoot "LICENSE") -Force
+
+      - name: リリースZIPを作成
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $distRoot = Join-Path (Resolve-Path ".") "dist"
+          $packageRoot = Join-Path $distRoot "ow2-victory-notifier"
+          $zipPath = Join-Path $distRoot "ow2-victory-notifier.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path $packageRoot -DestinationPath $zipPath -Force
+
+      - name: アーティファクト名を設定
+        shell: pwsh
+        run: |
+          $safeRefName = "${{ github.ref_name }}" -replace '[\\/:*?"<>|]', '-'
+          "ARTIFACT_NAME=ow2-victory-notifier-$safeRefName" >> $env:GITHUB_ENV
+
+      - name: アーティファクトをアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist/ow2-victory-notifier
+          if-no-files-found: error
+
+      - name: GitHub Release作成＆アセット添付
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ow2-victory-notifier.zip
+          draft: false
+          prerelease: false

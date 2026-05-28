@@ -1,0 +1,6 @@
+/target
+/config.toml
+/credentials.toml
+/credentials-*.toml
+/.omc/
+/.claude/

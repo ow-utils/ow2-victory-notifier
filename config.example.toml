@@ -1,0 +1,16 @@
+[detector]
+sse_url = "http://127.0.0.1:3000/events"
+
+# [nightbot]
+# callback_port = 8123  # OAuth コールバック受け取り用ローカルポート (auth サブコマンドのみで使用)。
+                        # 変更時は Nightbot OAuth アプリの Redirect URI も
+                        # http://127.0.0.1:<新ポート>/callback に揃える必要あり。
+
+[messages]
+language = "ja"   # ja|en
+victory = "{outcome}！"
+defeat = "{outcome}…"
+draw = "{outcome}"
+
+[filter]
+auto_only = true
