@@ -4,6 +4,8 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 投稿は Nightbot の HTTP API (`POST /1/channel/send`) のみを使います。Twitch IRC や YouTube Data API は使いません。Google API クォータ申請・OAuth 検証は不要です。
 
+この README のコマンド例は **PowerShell 7 (`pwsh`)** 前提です。
+
 ## 前提
 
 - `ow2-victory-counter` が起動しており、`http://127.0.0.1:3000/events` で SSE を配信していること
@@ -35,30 +37,31 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 ### 4. 設定ファイルの準備
 
-```sh
-cp config.example.toml config.toml
+```powershell
+Copy-Item config.example.toml config.toml
 ```
 
 `callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
 
 ### 5. 認証
 
-**推奨**: client_secret は環境変数経由で渡します (シェル履歴・`ps`・`/proc/{pid}/cmdline` に残らない)。
+**推奨**: client_secret は環境変数経由で渡します (コマンド履歴やプロセス引数に残りにくい)。
 
-```sh
-export NIGHTBOT_CLIENT_SECRET='<コピーした Client Secret>'
-cargo run -- auth nightbot --account twitch \
-    --client-id <コピーした Client ID> \
+```powershell
+$env:NIGHTBOT_CLIENT_SECRET = 'コピーした Client Secret'
+$clientId = 'コピーした Client ID'
+cargo run -- auth nightbot --account twitch `
+    --client-id $clientId `
     --client-secret-env NIGHTBOT_CLIENT_SECRET
 ```
 
 表示された URL をブラウザで開き、Nightbot の承認画面で `channel` と `channel_send` の 2 スコープを許可します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
 
-`--client-secret <SECRET>` で直接渡すこともできますが、シェル履歴と `ps` に残るため非推奨です (試験用途のみ)。
+`--client-secret <SECRET>` で直接渡すこともできますが、コマンド履歴やプロセス引数に残るため非推奨です (試験用途のみ)。
 
 ### 6. 通知ループの起動
 
-```sh
+```powershell
 cargo run -- run --account twitch
 ```
 
@@ -68,9 +71,10 @@ cargo run -- run --account twitch
 
 `--account twitch` と `--account youtube` を **別プロセス** で並列起動します:
 
-```sh
-cargo run -- run --account twitch &
-cargo run -- run --account youtube &
+```powershell
+$repo = (Get-Location).Path
+Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', 'cargo run -- run --account twitch'
+Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', 'cargo run -- run --account youtube'
 ```
 
 > ⚠️ **同じ `--account` を 2 プロセスで同時起動しないこと**。両方が並行 refresh して片方が `invalid_grant` を踏み、credentials が壊れます。本ツールは fs2 advisory lock で同一 account の二重起動を検出し、2 つ目のプロセスは起動時に明示エラー終了します。
@@ -105,10 +109,12 @@ Nightbot の OAuth アプリ管理画面で client_secret を rotate (再発行)
 
 rotate 直後に必ず以下を実行してください:
 
-```sh
-export NIGHTBOT_CLIENT_SECRET='<新しい Client Secret>'
-cargo run -- auth nightbot --account <name> \
-    --client-id <Client ID> \
+```powershell
+$env:NIGHTBOT_CLIENT_SECRET = '新しい Client Secret'
+$clientId = 'Client ID'
+$account = 'twitch'
+cargo run -- auth nightbot --account $account `
+    --client-id $clientId `
     --client-secret-env NIGHTBOT_CLIENT_SECRET
 ```
 
@@ -120,8 +126,9 @@ Nightbot の **refresh_token は「最後の使用から 60 日」で失効** �
 
 長期間配信が途絶える運用では、**60 日以内に 1 回以上** 次のいずれかを実行して refresh_token を rotate してください。
 
-```sh
-cargo run -- check --account <name> --force-refresh
+```powershell
+$account = 'twitch'
+cargo run -- check --account $account --force-refresh
 ```
 
 `--force-refresh` を付けると期限判定を迂回して無条件で refresh + 保存します。フラグ無しの `check` は access_token が残っている間は refresh を発火しないため、延命にはなりません。
@@ -130,7 +137,7 @@ cargo run -- check --account <name> --force-refresh
 
 同一 account の二重起動を fs2 advisory lock で防いでいるため、`run --account <name>` が走っている間に別プロセスで `check --account <name> --force-refresh` を起動すると **lock 競合で即終了** します。延命手順は次のいずれかです:
 
-- **(推奨)** `run` を一時停止 (`kill` / `systemctl stop`) → `check --account <name> --force-refresh` を実行 → `run` を再開
+- **(推奨)** `run` プロセスまたはサービスを一時停止 → `check --account <name> --force-refresh` を実行 → `run` を再開
 - 長期間配信予定が無いなら `run` を止めておき、60 日以内に 1 回 `check --account <name> --force-refresh` のみ実行
 
 ### 障害時の切り分け手順
