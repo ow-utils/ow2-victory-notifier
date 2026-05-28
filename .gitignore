@@ -3,3 +3,4 @@
 /credentials.toml
 /credentials-*.toml
 /.omc/
+/.claude/
