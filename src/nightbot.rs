@@ -75,7 +75,7 @@ pub enum NightbotError {
     #[error("ローカル HTTP サーバ起動失敗: {0}")]
     ServerStart(String),
     #[error(
-        "Nightbot OAuth アプリの許可スコープが不足しています (granted={granted}, missing={missing:?}). アプリ設定を見直して再認証してください"
+        "Nightbot OAuth の許可スコープが不足しています (granted={granted}, missing={missing:?}). 認証時に channel / channel_send を許可して再認証してください"
     )]
     InsufficientScope {
         granted: String,

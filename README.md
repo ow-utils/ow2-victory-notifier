@@ -26,12 +26,10 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 ### 3. Nightbot OAuth アプリの作成
 
-[Nightbot OAuth Applications](https://nightbot.tv/account/applications) で新規アプリを作成し、以下を設定します。
+[Nightbot Connections](https://nightbot.tv/settings/connections) にログインし、OAuth アプリ管理から新規アプリを作成します。画面 URL が変わっている場合は、Nightbot ダッシュボードの Settings / Connections から辿ってください。
 
 - **Redirect URI**: `http://127.0.0.1:8123/callback`
   - `config.toml` で `[nightbot] callback_port` を変更している場合はそのポートに合わせる
-- **Scopes**: `channel` と `channel_send` の両方
-  - 本ツールは送信用 (`channel_send`) に加えて、`check` で `GET /1/channel` (`channel` スコープ必須) を叩いて join 状態を確認します
 
 作成後、画面に表示される **Client ID** と **Client Secret** を控えます。
 
@@ -103,7 +101,7 @@ Unix ではファイルパーミッションを `0o600` に設定します。Win
 
 ### client_secret を rotate したときの再認証
 
-Nightbot OAuth Applications 画面で client_secret を rotate (再発行) した場合、ディスク上の `credentials-{account}.toml` に記録されているのは **rotate 前の旧 secret** です。access_token が生きている間は `send_message` / `get_channel` は Bearer 認証で動き続けるため気付きませんが、初回の `refresh` 試行時に Nightbot 側から `invalid_client` が返って通知ループが終了します (本ツールは `is_terminal()` で再認証必須を検出します)。
+Nightbot の OAuth アプリ管理画面で client_secret を rotate (再発行) した場合、ディスク上の `credentials-{account}.toml` に記録されているのは **rotate 前の旧 secret** です。access_token が生きている間は `send_message` / `get_channel` は Bearer 認証で動き続けるため気付きませんが、初回の `refresh` 試行時に Nightbot 側から `invalid_client` が返って通知ループが終了します (本ツールは `is_terminal()` で再認証必須を検出します)。
 
 rotate 直後に必ず以下を実行してください:
 
