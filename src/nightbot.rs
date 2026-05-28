@@ -1,10 +1,10 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde::Deserialize;
 use tracing::{error, info, warn};
 
@@ -64,7 +64,9 @@ pub enum NightbotError {
     },
     #[error("OAuth コールバックがタイムアウトしました。`auth nightbot` を再実行してください")]
     CallbackTimeout,
-    #[error("OAuth コールバックの拒否リクエストが上限 ({0}) に達しました。ローカルポートに想定外のリクエストが集中していないか確認のうえ `auth nightbot` を再実行してください")]
+    #[error(
+        "OAuth コールバックの拒否リクエストが上限 ({0}) に達しました。ローカルポートに想定外のリクエストが集中していないか確認のうえ `auth nightbot` を再実行してください"
+    )]
     CallbackTooManyRejects(u32),
     #[error("OAuth コールバック待機中に Ctrl+C で中断されました")]
     CallbackAborted,
@@ -72,7 +74,9 @@ pub enum NightbotError {
     CallbackTaskJoin(#[from] tokio::task::JoinError),
     #[error("ローカル HTTP サーバ起動失敗: {0}")]
     ServerStart(String),
-    #[error("Nightbot OAuth アプリの許可スコープが不足しています (granted={granted}, missing={missing:?}). アプリ設定を見直して再認証してください")]
+    #[error(
+        "Nightbot OAuth アプリの許可スコープが不足しています (granted={granted}, missing={missing:?}). アプリ設定を見直して再認証してください"
+    )]
     InsufficientScope {
         granted: String,
         missing: Vec<String>,
@@ -81,7 +85,9 @@ pub enum NightbotError {
     MessageTooLong { len: usize },
     #[error("Nightbot API のレート制限に連続でヒットしました")]
     RateLimited,
-    #[error("Nightbot API HTTP {status} error={error:?} desc={description:?} retry_after={retry_after_secs:?} body={raw_body}")]
+    #[error(
+        "Nightbot API HTTP {status} error={error:?} desc={description:?} retry_after={retry_after_secs:?} body={raw_body}"
+    )]
     HttpStatus {
         status: u16,
         error: Option<String>,
@@ -108,12 +114,11 @@ impl NightbotError {
     pub fn is_terminal(&self) -> bool {
         match self {
             // token endpoint (refresh / code 交換) は RFC6749 形式の `error` を返す。
-            NightbotError::HttpStatus {
-                error: Some(e), ..
-            } if matches!(
-                e.as_str(),
-                "invalid_grant" | "invalid_client" | "unauthorized_client" | "invalid_token"
-            ) =>
+            NightbotError::HttpStatus { error: Some(e), .. }
+                if matches!(
+                    e.as_str(),
+                    "invalid_grant" | "invalid_client" | "unauthorized_client" | "invalid_token"
+                ) =>
             {
                 true
             }
@@ -231,7 +236,10 @@ fn redact_form_key_in_string(s: &str, key: &str) -> String {
     while let Some(idx) = rest.find(&needle) {
         // key 直前が区切りでなければ部分一致なのでスキップ (誤爆回避)。
         let boundary_ok = idx == 0
-            || matches!(rest.as_bytes()[idx - 1], b'&' | b'?' | b' ' | b'\t' | b'\n' | b'\r');
+            || matches!(
+                rest.as_bytes()[idx - 1],
+                b'&' | b'?' | b' ' | b'\t' | b'\n' | b'\r'
+            );
         out.push_str(&rest[..idx]);
         out.push_str(&needle);
         let after_eq = &rest[idx + needle.len()..];
@@ -297,11 +305,10 @@ pub async fn authenticate(
     });
     let state_for_server = state.clone();
     let abort_for_server = abort.clone();
-    let server_handle = tokio::task::spawn_blocking(
-        move || -> Result<CallbackResult, NightbotError> {
+    let server_handle =
+        tokio::task::spawn_blocking(move || -> Result<CallbackResult, NightbotError> {
             run_callback_server(callback_port, &state_for_server, abort_for_server)
-        },
-    );
+        });
 
     // 3. 認可 URL を組み立てて表示
     let encoded_id = utf8_percent_encode(client_id, NON_ALPHANUMERIC).to_string();
@@ -399,7 +406,9 @@ pub async fn refresh(creds: &mut NightbotCreds) -> Result<(), NightbotError> {
 /// 事前に `ensure_fresh_token` で access_token が新鮮であることを保証すること
 /// (send_message と同じ前提)。
 pub async fn get_channel(creds: &NightbotCreds) -> Result<ChannelInfo, NightbotError> {
-    let req = http_client().get(CHANNEL_URL).bearer_auth(&creds.access_token);
+    let req = http_client()
+        .get(CHANNEL_URL)
+        .bearer_auth(&creds.access_token);
     let resp: ChannelResponse = fetch_json(req).await?;
     Ok(ChannelInfo {
         joined: resp.channel.joined,
@@ -435,7 +444,9 @@ pub async fn send_message(creds: &NightbotCreds, message: &str) -> Result<(), Ni
             tokio::time::sleep(Duration::from_secs(wait)).await;
             match attempt().await {
                 Ok(()) => Ok(()),
-                Err(NightbotError::HttpStatus { status: 429, .. }) => Err(NightbotError::RateLimited),
+                Err(NightbotError::HttpStatus { status: 429, .. }) => {
+                    Err(NightbotError::RateLimited)
+                }
                 Err(e) => Err(e),
             }
         }
@@ -574,8 +585,8 @@ fn run_callback_server(
         let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
         if path != "/callback" {
             // /favicon.ico などの誤受信は 404 で返して継続。
-            let _ = req
-                .respond(tiny_http::Response::from_string("not found").with_status_code(404));
+            let _ =
+                req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
             rejected += 1;
             continue;
         }
@@ -600,8 +611,8 @@ fn run_callback_server(
                         "mismatch"
                     }
                 );
-                let _ = req
-                    .respond(tiny_http::Response::from_string("ignored").with_status_code(400));
+                let _ =
+                    req.respond(tiny_http::Response::from_string("ignored").with_status_code(400));
                 rejected += 1;
                 continue;
             }
@@ -631,8 +642,8 @@ fn run_callback_server(
                         "mismatch"
                     }
                 );
-                let _ = req
-                    .respond(tiny_http::Response::from_string("ignored").with_status_code(400));
+                let _ =
+                    req.respond(tiny_http::Response::from_string("ignored").with_status_code(400));
                 rejected += 1;
                 continue;
             }
@@ -650,10 +661,7 @@ fn run_callback_server(
     }
 }
 
-fn make_html_response(
-    message: &str,
-    status: u16,
-) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+fn make_html_response(message: &str, status: u16) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     // 固定文言のみ埋め込む (外部入力は CLI 側のログにだけ流すため XSS リスクは無いが、
     // DOCTYPE と lang/charset を付けてモバイル含む各ブラウザで日本語が確実に出るようにする)。
     let body = format!(
@@ -662,11 +670,8 @@ fn make_html_response(
     tiny_http::Response::from_string(body)
         .with_status_code(status)
         .with_header(
-            tiny_http::Header::from_bytes(
-                &b"Content-Type"[..],
-                &b"text/html; charset=utf-8"[..],
-            )
-            .expect("static header bytes are valid"),
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                .expect("static header bytes are valid"),
         )
 }
 

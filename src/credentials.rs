@@ -189,7 +189,9 @@ pub enum CredentialsError {
     TomlDe(#[from] toml::de::Error),
     #[error("TOML シリアライズ失敗: {0}")]
     TomlSer(#[from] toml::ser::Error),
-    #[error("--account {account} は別プロセスが使用中です ({path}). 同じ account を 2 プロセスで起動しないでください")]
+    #[error(
+        "--account {account} は別プロセスが使用中です ({path}). 同じ account を 2 プロセスで起動しないでください"
+    )]
     Locked { account: String, path: PathBuf },
 }
 

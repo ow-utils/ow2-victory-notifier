@@ -1,5 +1,5 @@
 use crate::config::{Config, MessagesConfig};
-use crate::credentials::{Credentials, CredentialsError, CredentialsLock, NightbotCreds};
+use crate::credentials::{Credentials, CredentialsError, CredentialsLock};
 use crate::nightbot::{self, NightbotError};
 use crate::sse;
 use futures::StreamExt;
@@ -13,6 +13,8 @@ const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
 /// 短期間に複数回切断 → 60 秒まで肥大 → その後安定稼働、というケースで次回再接続が
 /// 不必要に遅延し続けるのを防ぐ。
 const SSE_HEALTHY_DURATION: Duration = Duration::from_secs(60);
+/// Nightbot 投稿の一過性エラー時に同一イベントで 1 回だけ再試行するまでの待機。
+const NIGHTBOT_SEND_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// 通知ループ。Nightbot 経由でライブチャットに勝敗を投稿する。
 /// eventsource-client は内部再接続を行うが、まれにストリーム自体が終了するため
@@ -97,8 +99,9 @@ async fn run_once(
     );
 
     while let Some(update) = stream.next().await {
-        // 接続直後のスナップショットや再接続時の再送など、既に処理済み (= 最大 timestamp 以下)
-        // のイベントを無視する。新しい結果は必ず新しい timestamp を持つため取りこぼさない。
+        // 接続直後のスナップショットや再接続時の再送など、投稿成功済み (= 最大 timestamp 以下)
+        // のイベントを無視する。投稿失敗時は watermark を進めず、再接続スナップショットで
+        // 再試行できる余地を残す。
         if is_replayed(update.timestamp, *last_processed_ts) {
             tracing::debug!(
                 "skip replayed/stale event: ts={} <= {}",
@@ -107,8 +110,6 @@ async fn run_once(
             );
             continue;
         }
-        *last_processed_ts = update.timestamp;
-
         if config.filter.auto_only && update.source != "auto" {
             tracing::debug!("skip: source={}", update.source);
             continue;
@@ -123,66 +124,197 @@ async fn run_once(
         let text = build_message(&config.messages, outcome);
         info!("通知: outcome={} text={}", outcome, text);
 
-        let Some(creds) = credentials.nightbot.as_mut() else {
-            warn!(
-                "Nightbot 認証情報がありません ({0}). `auth nightbot --account {0}` を実行してください",
-                account
-            );
-            continue;
-        };
-
         // refresh が走ったら send より前に save。save 失敗時はメモリ上の (新) token と
         // ファイル上の (旧、Nightbot 側で既に失効) token が乖離するため、修復不能状態を作らない
         // よう即終了する。
-        match nightbot::ensure_fresh_token(creds).await {
-            Ok(true) => {
-                if let Err(e) = credentials.save(account) {
-                    error!(
-                        "rotation 後の credentials 保存に失敗。修復不能の場合は `auth nightbot --account {}` で再認証してください: {}",
-                        account, e
-                    );
-                    return Err(NotifierError::CredentialsSaveFailed {
-                        account: account.to_string(),
-                        source: e,
-                    });
-                }
-            }
-            Ok(false) => {}
-            Err(e) if e.is_terminal() => {
-                error!(
-                    "token refresh が再試行不能なエラー ({e})。`auth nightbot --account {account}` で再認証してください"
-                );
-                return Err(NotifierError::TerminalAuth {
-                    account: account.to_string(),
-                    source: e,
-                });
-            }
-            Err(e) => {
-                warn!("token refresh 失敗 (継続): {}", e);
-                continue;
-            }
+        if !ensure_token_and_save_if_rotated(credentials, account).await? {
+            continue;
         }
 
-        let creds_ref: &NightbotCreds = credentials
-            .nightbot
-            .as_ref()
-            .expect("nightbot creds were Some above and refresh does not unset");
-        match nightbot::send_message(creds_ref, &text).await {
-            Ok(()) => info!("Nightbot 投稿成功"),
-            Err(e) if e.is_terminal() => {
-                error!(
-                    "Nightbot 投稿が再試行不能なエラー ({e})。`auth nightbot --account {account}` で再認証してください"
-                );
-                return Err(NotifierError::TerminalAuth {
-                    account: account.to_string(),
-                    source: e,
-                });
+        match send_message_with_recovery(credentials, account, &text).await? {
+            SendOutcome::Posted => {
+                *last_processed_ts = update.timestamp;
+                info!("Nightbot 投稿成功");
             }
-            Err(e) => warn!("Nightbot 投稿失敗 (継続): {}", e),
+            SendOutcome::TransientFailed => {
+                warn!(
+                    "Nightbot 投稿が一過性エラーで失敗したため timestamp={} は処理済みにしません",
+                    update.timestamp
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+enum SendOutcome {
+    Posted,
+    TransientFailed,
+}
+
+async fn ensure_token_and_save_if_rotated(
+    credentials: &mut Credentials,
+    account: &str,
+) -> Result<bool, NotifierError> {
+    let Some(creds) = credentials.nightbot.as_mut() else {
+        warn!(
+            "Nightbot 認証情報がありません ({0}). `auth nightbot --account {0}` を実行してください",
+            account
+        );
+        return Ok(false);
+    };
+
+    match nightbot::ensure_fresh_token(creds).await {
+        Ok(true) => {
+            save_credentials_after_rotation(credentials, account)?;
+            Ok(true)
+        }
+        Ok(false) => Ok(true),
+        Err(e) if e.is_terminal() => {
+            error!(
+                "token refresh が再試行不能なエラー ({e})。`auth nightbot --account {account}` で再認証してください"
+            );
+            Err(NotifierError::TerminalAuth {
+                account: account.to_string(),
+                source: e,
+            })
+        }
+        Err(e) => {
+            warn!("token refresh 失敗 (継続): {}", e);
+            Ok(false)
+        }
+    }
+}
+
+async fn send_message_with_recovery(
+    credentials: &mut Credentials,
+    account: &str,
+    text: &str,
+) -> Result<SendOutcome, NotifierError> {
+    let Some(creds) = credentials.nightbot.as_ref() else {
+        warn!(
+            "Nightbot 認証情報がありません ({0}). `auth nightbot --account {0}` を実行してください",
+            account
+        );
+        return Ok(SendOutcome::TransientFailed);
+    };
+
+    match nightbot::send_message(creds, text).await {
+        Ok(()) => return Ok(SendOutcome::Posted),
+        Err(e) if is_bearer_auth_failure(&e) => {
+            warn!("Nightbot 投稿が認証エラー ({e})。強制 refresh 後に 1 回だけ再試行します");
+            return retry_after_forced_refresh(credentials, account, text).await;
+        }
+        Err(e) if e.is_terminal() => return Err(terminal_auth(account, e)),
+        Err(e) => warn!(
+            "Nightbot 投稿失敗 ({} 秒後に 1 回だけ再試行): {}",
+            NIGHTBOT_SEND_RETRY_DELAY.as_secs(),
+            e
+        ),
+    }
+
+    tokio::time::sleep(NIGHTBOT_SEND_RETRY_DELAY).await;
+    let creds = credentials
+        .nightbot
+        .as_ref()
+        .expect("nightbot creds were Some above and refresh does not unset");
+    match nightbot::send_message(creds, text).await {
+        Ok(()) => Ok(SendOutcome::Posted),
+        Err(e) if is_bearer_auth_failure(&e) => {
+            warn!(
+                "Nightbot 投稿の再試行も認証エラー ({e})。強制 refresh 後に最後の 1 回だけ再試行します"
+            );
+            retry_after_forced_refresh(credentials, account, text).await
+        }
+        Err(e) if e.is_terminal() => Err(terminal_auth(account, e)),
+        Err(e) => {
+            warn!("Nightbot 投稿失敗 (再試行後も継続): {}", e);
+            Ok(SendOutcome::TransientFailed)
+        }
+    }
+}
+
+async fn retry_after_forced_refresh(
+    credentials: &mut Credentials,
+    account: &str,
+    text: &str,
+) -> Result<SendOutcome, NotifierError> {
+    if !force_refresh_and_save(credentials, account).await? {
+        return Ok(SendOutcome::TransientFailed);
+    }
+    let creds = credentials
+        .nightbot
+        .as_ref()
+        .expect("nightbot creds were Some above and refresh does not unset");
+    match nightbot::send_message(creds, text).await {
+        Ok(()) => Ok(SendOutcome::Posted),
+        Err(e) if e.is_terminal() => Err(terminal_auth(account, e)),
+        Err(e) => {
+            warn!("Nightbot 投稿失敗 (強制 refresh 後の再試行): {}", e);
+            Ok(SendOutcome::TransientFailed)
+        }
+    }
+}
+
+async fn force_refresh_and_save(
+    credentials: &mut Credentials,
+    account: &str,
+) -> Result<bool, NotifierError> {
+    let Some(creds) = credentials.nightbot.as_mut() else {
+        return Err(NotifierError::NoCredentials {
+            account: account.to_string(),
+        });
+    };
+
+    match nightbot::refresh(creds).await {
+        Ok(()) => {
+            save_credentials_after_rotation(credentials, account)?;
+            Ok(true)
+        }
+        Err(e) if e.is_terminal() => Err(terminal_auth(account, e)),
+        Err(e) => {
+            warn!("強制 refresh 失敗 (継続): {}", e);
+            Ok(false)
+        }
+    }
+}
+
+fn save_credentials_after_rotation(
+    credentials: &Credentials,
+    account: &str,
+) -> Result<(), NotifierError> {
+    if let Err(e) = credentials.save(account) {
+        error!(
+            "rotation 後の credentials 保存に失敗。修復不能の場合は `auth nightbot --account {}` で再認証してください: {}",
+            account, e
+        );
+        return Err(NotifierError::CredentialsSaveFailed {
+            account: account.to_string(),
+            source: e,
+        });
+    }
+    Ok(())
+}
+
+fn terminal_auth(account: &str, e: NightbotError) -> NotifierError {
+    error!(
+        "Nightbot 認証が再試行不能なエラー ({e})。`auth nightbot --account {account}` で再認証してください"
+    );
+    NotifierError::TerminalAuth {
+        account: account.to_string(),
+        source: e,
+    }
+}
+
+fn is_bearer_auth_failure(e: &NightbotError) -> bool {
+    matches!(
+        e,
+        NightbotError::HttpStatus {
+            status: 401 | 403,
+            ..
+        }
+    )
 }
 
 /// 現在の UNIX 時刻を秒 (f64) で返す。SSE イベントの timestamp (counter 側が
@@ -235,15 +367,21 @@ pub enum NotifierError {
         #[source]
         source: CredentialsError,
     },
-    #[error("Nightbot 認証が再認証必須 (account={account}): {source}. `auth nightbot --account {account}` を実行してください")]
+    #[error(
+        "Nightbot 認証が再認証必須 (account={account}): {source}. `auth nightbot --account {account}` を実行してください"
+    )]
     TerminalAuth {
         account: String,
         #[source]
         source: NightbotError,
     },
-    #[error("Nightbot 認証情報がありません (account={account})。`auth nightbot --account {account}` を実行してください")]
+    #[error(
+        "Nightbot 認証情報がありません (account={account})。`auth nightbot --account {account}` を実行してください"
+    )]
     NoCredentials { account: String },
-    #[error("messages.{outcome} の文面がテンプレート展開後 {len} 文字で Nightbot の上限 {max} 文字を超えています。config.toml を見直してください")]
+    #[error(
+        "messages.{outcome} の文面がテンプレート展開後 {len} 文字で Nightbot の上限 {max} 文字を超えています。config.toml を見直してください"
+    )]
     MessageTooLong {
         outcome: String,
         len: usize,

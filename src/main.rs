@@ -77,8 +77,9 @@ impl NightbotClientSecret {
             return Ok(s.clone());
         }
         if let Some(var) = &self.client_secret_env {
-            return Ok(std::env::var(var)
-                .map_err(|e| format!("環境変数 {var} の読み取りに失敗: {e}"))?);
+            return Ok(
+                std::env::var(var).map_err(|e| format!("環境変数 {var} の読み取りに失敗: {e}"))?
+            );
         }
         Err("--client-secret または --client-secret-env のどちらかを指定してください".into())
     }
@@ -189,7 +190,10 @@ async fn cmd_check(
     let config = Config::from_file(config_path)?;
     let (mut credentials, _lock) = Credentials::load_locked(account)?;
     println!("config: ok ({})", config_path);
-    println!("account: {} (callback_port={})", account, config.nightbot.callback_port);
+    println!(
+        "account: {} (callback_port={})",
+        account, config.nightbot.callback_port
+    );
 
     // 文面長を起動前に検証 (上限超過だと run 時に毎試合投稿が落ち続けるため early に弾く)。
     match notifier::validate_message_lengths(&config.messages) {
@@ -200,22 +204,26 @@ async fn cmd_check(
     println!("SSE 接続テスト: {}", config.detector.sse_url);
     // eventsource-client は内部で自動再接続するため、接続先がダウンしていても
     // `s.next().await` は Err を返さず再試行し続ける。よって「最初の event を受信できたか」
-    // しか確実には判定できない (= timeout は接続不成立とイベント無流入の両方を含む)。
-    // この性質を踏まえ、timeout を成功側に倒さず "未確認" として正直に出す。
+    // で疎通確認する。check は健全性確認コマンドなので timeout / 初期化失敗は非ゼロ終了。
     match tokio::time::timeout(std::time::Duration::from_secs(10), async {
         use futures::StreamExt;
         let mut s = sse::connect(&config.detector.sse_url).map_err(|e| e.to_string())?;
-        let _ = s.next().await;
-        Ok::<(), String>(())
+        match s.next().await {
+            Some(_) => Ok::<(), String>(()),
+            None => Err("SSE ストリームが event 受信前に終了しました".to_string()),
+        }
     })
     .await
     {
         Ok(Ok(())) => println!("  SSE: event 受信を確認 (接続成功)"),
         // connect() 自体の失敗 (URL パース等)。ストリーム断は自動再接続されるためここには来にくい。
-        Ok(Err(e)) => println!("  SSE: 接続初期化に失敗: {}", e),
-        Err(_) => println!(
-            "  SSE: 10 秒以内に event を受信できませんでした (サーバ無応答 / event 未流入のいずれか。接続可否は判定不能)"
-        ),
+        Ok(Err(e)) => return Err(format!("SSE: 接続確認に失敗: {e}").into()),
+        Err(_) => {
+            return Err(
+                "SSE: 10 秒以内に event を受信できませんでした (サーバ無応答 / event 未流入)"
+                    .into(),
+            );
+        }
     }
 
     let Some(creds) = credentials.nightbot.as_mut() else {

@@ -78,7 +78,9 @@ pub enum ConfigError {
     Io(String, #[source] std::io::Error),
     #[error("TOML パース失敗: {0}")]
     Toml(#[from] toml::de::Error),
-    #[error("[nightbot] callback_port に 0 を指定できません (Nightbot OAuth アプリの Redirect URI とミスマッチするため)")]
+    #[error(
+        "[nightbot] callback_port に 0 を指定できません (Nightbot OAuth アプリの Redirect URI とミスマッチするため)"
+    )]
     InvalidCallbackPort,
 }
 
@@ -131,6 +133,9 @@ draw = "{outcome}"
 auto_only = true
 "#;
         let c: Config = toml::from_str(toml_str).unwrap();
-        assert!(matches!(c.validate(), Err(ConfigError::InvalidCallbackPort)));
+        assert!(matches!(
+            c.validate(),
+            Err(ConfigError::InvalidCallbackPort)
+        ));
     }
 }
