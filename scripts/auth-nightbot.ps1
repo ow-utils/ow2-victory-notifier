@@ -53,6 +53,7 @@ $psi.FileName = $ExePath
 $psi.WorkingDirectory = Split-Path -Parent $ExePath
 $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
+$psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
 $psi.Environment[$ClientSecretEnv] = $plainSecret
 
 foreach ($arg in @(
