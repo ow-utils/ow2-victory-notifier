@@ -61,7 +61,13 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\auth-nightbot.ps1 -Accou
 
 画面の指示に従って **Client ID** と **Client Secret** を入力します。Client ID は `-ClientId` で渡すこともできます。
 
-表示された URL をブラウザで開き、Nightbot の承認画面で要求内容を確認して承認します。本ツールは認可 URL で `channel` と `channel_send` を要求し、認証後に付与済みスコープを検証します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
+スクリプトは表示された認可 URL を検出して既定のブラウザーで開きます。自動起動しない場合は、表示された URL を手動で開いてください。Nightbot の承認画面で要求内容を確認して承認します。本ツールは認可 URL で `channel` と `channel_send` を要求し、認証後に付与済みスコープを検証します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
+
+ブラウザーを自動起動したくない場合は `-NoBrowser` を付けます。
+
+```powershell
+.\scripts\auth-nightbot.ps1 -Account twitch -NoBrowser
+```
 
 `--client-secret <SECRET>` で直接渡すこともできますが、コマンド履歴やプロセス引数に残るため非推奨です (試験用途のみ)。
 

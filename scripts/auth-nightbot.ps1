@@ -4,7 +4,8 @@ param(
     [string]$ClientId,
     [string]$ClientSecretEnv = "NIGHTBOT_CLIENT_SECRET",
     [string]$ExePath,
-    [string]$Config
+    [string]$Config,
+    [switch]$NoBrowser
 )
 
 Set-StrictMode -Version Latest
@@ -50,17 +51,75 @@ try {
         throw "Client Secret is required."
     }
 
-    Set-Item -Path "Env:$ClientSecretEnv" -Value $plainSecret
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $ExePath
+    $psi.WorkingDirectory = Split-Path -Parent $ExePath
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Environment[$ClientSecretEnv] = $plainSecret
 
-    & $ExePath auth nightbot --account $Account `
-        --config $Config `
-        --client-id $ClientId `
-        --client-secret-env $ClientSecretEnv
+    foreach ($arg in @(
+        "auth",
+        "nightbot",
+        "--account",
+        $Account,
+        "--config",
+        $Config,
+        "--client-id",
+        $ClientId,
+        "--client-secret-env",
+        $ClientSecretEnv
+    )) {
+        $psi.ArgumentList.Add($arg)
+    }
 
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    $script:AuthNightbotNoBrowser = [bool]$NoBrowser
+    $script:AuthNightbotOpenedAuthUrl = $false
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    $process.add_OutputDataReceived({
+        param($sender, $eventArgs)
+
+        if ($null -eq $eventArgs.Data) {
+            return
+        }
+
+        [Console]::Out.WriteLine($eventArgs.Data)
+
+        if (-not $script:AuthNightbotNoBrowser -and
+            -not $script:AuthNightbotOpenedAuthUrl -and
+            $eventArgs.Data -match '^https://api\.nightbot\.tv/oauth2/authorize\?') {
+            $script:AuthNightbotOpenedAuthUrl = $true
+            try {
+                Start-Process $eventArgs.Data
+            }
+            catch {
+                [Console]::Error.WriteLine("Failed to open browser automatically: $($_.Exception.Message)")
+            }
+        }
+    })
+    $process.add_ErrorDataReceived({
+        param($sender, $eventArgs)
+
+        if ($null -ne $eventArgs.Data) {
+            [Console]::Error.WriteLine($eventArgs.Data)
+        }
+    })
+
+    if (-not $process.Start()) {
+        throw "Failed to start '$ExePath'."
+    }
+
+    $process.BeginOutputReadLine()
+    $process.BeginErrorReadLine()
+    $process.WaitForExit()
+
+    if ($process.ExitCode -ne 0) {
+        exit $process.ExitCode
     }
 }
 finally {
-    Remove-Item -Path "Env:$ClientSecretEnv" -ErrorAction SilentlyContinue
+    Remove-Variable -Name AuthNightbotNoBrowser -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable -Name AuthNightbotOpenedAuthUrl -Scope Script -ErrorAction SilentlyContinue
 }

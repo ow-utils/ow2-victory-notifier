@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
@@ -305,10 +306,37 @@ pub async fn authenticate(
     });
     let state_for_server = state.clone();
     let abort_for_server = abort.clone();
+    let (server_ready_tx, server_ready_rx) = mpsc::sync_channel(1);
     let server_handle =
         tokio::task::spawn_blocking(move || -> Result<CallbackResult, NightbotError> {
-            run_callback_server(callback_port, &state_for_server, abort_for_server)
+            let server = match bind_callback_server(callback_port) {
+                Ok(server) => {
+                    let _ = server_ready_tx.send(Ok(()));
+                    server
+                }
+                Err(e) => {
+                    let _ = server_ready_tx.send(Err(e.to_string()));
+                    return Err(e);
+                }
+            };
+            run_callback_server(server, &state_for_server, abort_for_server)
         });
+
+    match server_ready_rx.recv() {
+        Ok(Ok(())) => {}
+        Ok(Err(message)) => {
+            signal_task.abort();
+            let _ = server_handle.await;
+            return Err(NightbotError::ServerStart(message));
+        }
+        Err(e) => {
+            signal_task.abort();
+            let _ = server_handle.await;
+            return Err(NightbotError::ServerStart(format!(
+                "OAuth コールバックサーバ起動確認に失敗: {e}"
+            )));
+        }
+    }
 
     // 3. 認可 URL を組み立てて表示
     let encoded_id = utf8_percent_encode(client_id, NON_ALPHANUMERIC).to_string();
@@ -534,21 +562,10 @@ async fn fetch_no_body(req: reqwest::RequestBuilder) -> Result<(), NightbotError
 }
 
 fn run_callback_server(
-    callback_port: u16,
+    server: tiny_http::Server,
     expected_state: &str,
     abort: Arc<AtomicBool>,
 ) -> Result<CallbackResult, NightbotError> {
-    let server = tiny_http::Server::http(("127.0.0.1", callback_port)).map_err(|e| {
-        if let Some(io) = e.downcast_ref::<std::io::Error>()
-            && io.kind() == std::io::ErrorKind::AddrInUse
-        {
-            return NightbotError::ServerStart(format!(
-                "ポート {callback_port} が既に使用されています。他プロセス終了か `config.toml` の `[nightbot] callback_port` 変更で対処してください (変更時は Nightbot OAuth アプリ側 Redirect URI も合わせる)。確認: `ss -ltnp 'sport = :{callback_port}'`"
-            ));
-        }
-        NightbotError::ServerStart(format!("tiny_http サーバ起動失敗: {e}"))
-    })?;
-
     let deadline = Instant::now() + CALLBACK_DEADLINE;
     let mut rejected: u32 = 0;
     loop {
@@ -659,6 +676,19 @@ fn run_callback_server(
         let _ = req.respond(tiny_http::Response::from_string("ignored").with_status_code(400));
         rejected += 1;
     }
+}
+
+fn bind_callback_server(callback_port: u16) -> Result<tiny_http::Server, NightbotError> {
+    tiny_http::Server::http(("127.0.0.1", callback_port)).map_err(|e| {
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && io.kind() == std::io::ErrorKind::AddrInUse
+        {
+            return NightbotError::ServerStart(format!(
+                "ポート {callback_port} が既に使用されています。他プロセス終了か `config.toml` の `[nightbot] callback_port` 変更で対処してください (変更時は Nightbot OAuth アプリ側 Redirect URI も合わせる)。確認: `ss -ltnp 'sport = :{callback_port}'`"
+            ));
+        }
+        NightbotError::ServerStart(format!("tiny_http サーバ起動失敗: {e}"))
+    })
 }
 
 fn make_html_response(message: &str, status: u16) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
