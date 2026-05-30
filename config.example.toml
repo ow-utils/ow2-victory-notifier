@@ -2,21 +2,22 @@
 sse_url = "http://127.0.0.1:3000/events"
 
 # [nightbot]
-# callback_port = 8123  # OAuth コールバック受け取り用ローカルポート (auth サブコマンドのみで使用)。
-                        # 変更時は Nightbot OAuth アプリの Redirect URI も
-                        # http://127.0.0.1:<新ポート>/callback に揃える必要あり。
+## OAuth コールバック受け取り用ローカルポート (auth サブコマンドのみで使用)。
+## 変更時は Nightbot OAuth アプリの Redirect URI も
+## http://127.0.0.1:<新ポート>/callback に揃える必要あり。
+# callback_port = 8123
 
 [messages]
-language = "ja"   # ja|en
+# ja|en
+language = "ja"
 # 使用できるプレースホルダー:
 # {outcome}: 勝利/敗北/引き分け (language=en では Victory/Defeat/Draw)
 # {victories}: 勝利数, {defeats}: 敗北数, {draws}: 引き分け数
 # {total}: 勝利数+敗北数+引き分け数
 # {winrate}: 勝利数/(勝利数+敗北数)*100 を小数第2位まで表示 (引き分けは母数から除外)
 # {time}: notifier が投稿文を作成したローカル時刻 (HH:MM:SS)
-# 例: victory = "{outcome}！ 現在 {victories}勝 {defeats}敗 {draws}分 / {total}戦 勝率{winrate}% ({time})"
-victory = "{outcome}！"
-defeat = "{outcome}…"
+victory = "{outcome}！ 現在 {victories}勝 {defeats}敗 / {total}戦 勝率{winrate}% ({time})"
+defeat = "{outcome}... 現在 {victories}勝 {defeats}敗 / {total}戦 勝率{winrate}% ({time})"
 draw = "{outcome}"
 
 [filter]
