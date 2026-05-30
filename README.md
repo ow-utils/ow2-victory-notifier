@@ -4,6 +4,8 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 投稿は Nightbot の HTTP API (`POST /1/channel/send`) のみを使います。Twitch IRC や YouTube Data API は使いません。Google API クォータ申請・OAuth 検証は不要です。
 
+この README のコマンド例は **PowerShell 7 (`pwsh`)** 前提です。
+
 ## 前提
 
 - `ow2-victory-counter` が起動しており、`http://127.0.0.1:3000/events` で SSE を配信していること
@@ -26,42 +28,53 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 
 ### 3. Nightbot OAuth アプリの作成
 
-[Nightbot OAuth Applications](https://nightbot.tv/account/applications) で新規アプリを作成し、以下を設定します。
+[Nightbot Connections](https://nightbot.tv/settings/connections) にログインし、OAuth アプリ管理から新規アプリを作成します。画面 URL が変わっている場合は、Nightbot ダッシュボードの Settings / Connections から辿ってください。
 
 - **Redirect URI**: `http://127.0.0.1:8123/callback`
   - `config.toml` で `[nightbot] callback_port` を変更している場合はそのポートに合わせる
-- **Scopes**: `channel` と `channel_send` の両方
-  - 本ツールは送信用 (`channel_send`) に加えて、`check` で `GET /1/channel` (`channel` スコープ必須) を叩いて join 状態を確認します
 
 作成後、画面に表示される **Client ID** と **Client Secret** を控えます。
 
 ### 4. 設定ファイルの準備
 
-```sh
-cp config.example.toml config.toml
+```powershell
+Copy-Item config.example.toml config.toml
 ```
 
-`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
+配布版には `config.example.toml` が同梱されています。`config.toml` がまだ無い場合はコピーして作成してください。`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
 
 ### 5. 認証
 
-**推奨**: client_secret は環境変数経由で渡します (シェル履歴・`ps`・`/proc/{pid}/cmdline` に残らない)。
+**推奨**: 付属の PowerShell スクリプトで認証します。Client Secret はマスク入力し、スクリプト内で一時的に環境変数へ設定して `ow2-victory-notifier.exe` に渡します。終了時に環境変数は削除され、コマンド履歴やプロセス引数には Client Secret が残りません。
 
-```sh
-export NIGHTBOT_CLIENT_SECRET='<コピーした Client Secret>'
-cargo run -- auth nightbot --account twitch \
-    --client-id <コピーした Client ID> \
-    --client-secret-env NIGHTBOT_CLIENT_SECRET
+既定では、配布フォルダにある `ow2-victory-notifier.exe` と `config.toml` を使います。
+
+```powershell
+.\scripts\auth-nightbot.ps1 -Account twitch
 ```
 
-表示された URL をブラウザで開き、Nightbot の承認画面で `channel` と `channel_send` の 2 スコープを許可します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
+実行ポリシーでブロックされる場合は、次のように `pwsh` から明示的に実行してください。
 
-`--client-secret <SECRET>` で直接渡すこともできますが、シェル履歴と `ps` に残るため非推奨です (試験用途のみ)。
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\auth-nightbot.ps1 -Account twitch
+```
+
+画面の指示に従って **Client ID** と **Client Secret** を入力します。Client ID は `-ClientId` で渡すこともできます。
+
+スクリプトは表示された認可 URL を検出して既定のブラウザーで開きます。自動起動しない場合は、表示された URL を手動で開いてください。Nightbot の承認画面で要求内容を確認して承認します。本ツールは認可 URL で `channel` と `channel_send` を要求し、認証後に付与済みスコープを検証します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
+
+ブラウザーを自動起動したくない場合は `-NoBrowser` を付けます。
+
+```powershell
+.\scripts\auth-nightbot.ps1 -Account twitch -NoBrowser
+```
+
+`--client-secret <SECRET>` で直接渡すこともできますが、コマンド履歴やプロセス引数に残るため非推奨です (試験用途のみ)。
 
 ### 6. 通知ループの起動
 
-```sh
-cargo run -- run --account twitch
+```powershell
+.\ow2-victory-notifier.exe run --account twitch
 ```
 
 `ow2-victory-counter` が一時的に落ちて SSE が切れても、本ツールは内部でバックオフ付き (1 秒から最大 60 秒) で再接続を試み続けます。再認証必須エラー (`invalid_grant` / `invalid_client` / スコープ不足) を踏んだ場合のみ非ゼロ終了するため、systemd 等で再起動だけでは復旧しません — その場合は `auth nightbot --account <name>` をやり直してください。
@@ -70,9 +83,10 @@ cargo run -- run --account twitch
 
 `--account twitch` と `--account youtube` を **別プロセス** で並列起動します:
 
-```sh
-cargo run -- run --account twitch &
-cargo run -- run --account youtube &
+```powershell
+$repo = (Get-Location).Path
+Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', '.\ow2-victory-notifier.exe run --account twitch'
+Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', '.\ow2-victory-notifier.exe run --account youtube'
 ```
 
 > ⚠️ **同じ `--account` を 2 プロセスで同時起動しないこと**。両方が並行 refresh して片方が `invalid_grant` を踏み、credentials が壊れます。本ツールは fs2 advisory lock で同一 account の二重起動を検出し、2 つ目のプロセスは起動時に明示エラー終了します。
@@ -103,15 +117,12 @@ Unix ではファイルパーミッションを `0o600` に設定します。Win
 
 ### client_secret を rotate したときの再認証
 
-Nightbot OAuth Applications 画面で client_secret を rotate (再発行) した場合、ディスク上の `credentials-{account}.toml` に記録されているのは **rotate 前の旧 secret** です。access_token が生きている間は `send_message` / `get_channel` は Bearer 認証で動き続けるため気付きませんが、初回の `refresh` 試行時に Nightbot 側から `invalid_client` が返って通知ループが終了します (本ツールは `is_terminal()` で再認証必須を検出します)。
+Nightbot の OAuth アプリ管理画面で client_secret を rotate (再発行) した場合、ディスク上の `credentials-{account}.toml` に記録されているのは **rotate 前の旧 secret** です。access_token が生きている間は `send_message` / `get_channel` は Bearer 認証で動き続けるため気付きませんが、初回の `refresh` 試行時に Nightbot 側から `invalid_client` が返って通知ループが終了します (本ツールは `is_terminal()` で再認証必須を検出します)。
 
 rotate 直後に必ず以下を実行してください:
 
-```sh
-export NIGHTBOT_CLIENT_SECRET='<新しい Client Secret>'
-cargo run -- auth nightbot --account <name> \
-    --client-id <Client ID> \
-    --client-secret-env NIGHTBOT_CLIENT_SECRET
+```powershell
+.\scripts\auth-nightbot.ps1 -Account twitch
 ```
 
 `auth nightbot` は credentials を上書きするため、新 secret が `credentials-{account}.toml` に書き込まれて以降の refresh が成功するようになります。
@@ -122,8 +133,9 @@ Nightbot の **refresh_token は「最後の使用から 60 日」で失効** �
 
 長期間配信が途絶える運用では、**60 日以内に 1 回以上** 次のいずれかを実行して refresh_token を rotate してください。
 
-```sh
-cargo run -- check --account <name> --force-refresh
+```powershell
+$account = 'twitch'
+.\ow2-victory-notifier.exe check --account $account --force-refresh
 ```
 
 `--force-refresh` を付けると期限判定を迂回して無条件で refresh + 保存します。フラグ無しの `check` は access_token が残っている間は refresh を発火しないため、延命にはなりません。
@@ -132,12 +144,12 @@ cargo run -- check --account <name> --force-refresh
 
 同一 account の二重起動を fs2 advisory lock で防いでいるため、`run --account <name>` が走っている間に別プロセスで `check --account <name> --force-refresh` を起動すると **lock 競合で即終了** します。延命手順は次のいずれかです:
 
-- **(推奨)** `run` を一時停止 (`kill` / `systemctl stop`) → `check --account <name> --force-refresh` を実行 → `run` を再開
+- **(推奨)** `run` プロセスまたはサービスを一時停止 → `check --account <name> --force-refresh` を実行 → `run` を再開
 - 長期間配信予定が無いなら `run` を止めておき、60 日以内に 1 回 `check --account <name> --force-refresh` のみ実行
 
 ### 障害時の切り分け手順
 
-1. `cargo run -- check --account <name>` で疎通確認 (SSE + Nightbot API + Join 状態)
+1. `.\ow2-victory-notifier.exe check --account <name>` で疎通確認 (SSE + Nightbot API + Join 状態)
 2. [Nightbot ダッシュボード](https://nightbot.tv/) でアカウント・Join 状態を確認
 3. 必要なら `auth nightbot --account <name> ...` で再認証
 
