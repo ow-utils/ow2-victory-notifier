@@ -1,7 +1,8 @@
 use crate::config::{Config, MessagesConfig};
 use crate::credentials::{Credentials, CredentialsError, CredentialsLock};
 use crate::nightbot::{self, NightbotError};
-use crate::sse;
+use crate::sse::{self, CounterUpdate};
+use chrono::Local;
 use futures::StreamExt;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
@@ -121,7 +122,8 @@ async fn run_once(
             continue;
         }
 
-        let text = build_message(&config.messages, outcome);
+        let text = build_message(&config.messages, &update);
+        validate_message_text_len(outcome, &text)?;
         info!("通知: outcome={} text={}", outcome, text);
 
         // refresh が走ったら send より前に save。save 失敗時はメモリ上の (新) token と
@@ -334,7 +336,10 @@ fn is_replayed(event_ts: f64, last_processed_ts: f64) -> bool {
     event_ts <= last_processed_ts
 }
 
-fn build_message(messages: &MessagesConfig, outcome: &str) -> String {
+fn build_message(messages: &MessagesConfig, update: &CounterUpdate) -> String {
+    let Some(outcome) = update.last_outcome.as_deref() else {
+        return String::new();
+    };
     let localized = localize_outcome(outcome, &messages.language);
     let template = match outcome {
         "victory" => &messages.victory,
@@ -342,7 +347,31 @@ fn build_message(messages: &MessagesConfig, outcome: &str) -> String {
         "draw" => &messages.draw,
         _ => return String::new(),
     };
-    template.replace("{outcome}", localized)
+    template
+        .replace("{outcome}", localized)
+        .replace("{victories}", &update.victories.to_string())
+        .replace("{defeats}", &update.defeats.to_string())
+        .replace("{draws}", &update.draws.to_string())
+        .replace("{total}", &total_matches(update).to_string())
+        .replace("{winrate}", &format!("{:.2}", winrate(update)))
+        .replace("{time}", &local_time_hms())
+}
+
+fn total_matches(update: &CounterUpdate) -> u32 {
+    update.victories + update.defeats + update.draws
+}
+
+fn winrate(update: &CounterUpdate) -> f64 {
+    let decided = update.victories + update.defeats;
+    if decided == 0 {
+        0.0
+    } else {
+        f64::from(update.victories) / f64::from(decided) * 100.0
+    }
+}
+
+fn local_time_hms() -> String {
+    Local::now().format("%H:%M:%S").to_string()
 }
 
 fn localize_outcome(outcome: &str, language: &str) -> &'static str {
@@ -393,16 +422,33 @@ pub enum NotifierError {
 /// run / check の起動時に呼び、毎試合 `MessageTooLong` で投稿が落ち続ける設定を早期に弾く。
 pub fn validate_message_lengths(messages: &MessagesConfig) -> Result<(), NotifierError> {
     for outcome in ["victory", "defeat", "draw"] {
-        let len = build_message(messages, outcome).chars().count();
-        if len > nightbot::MESSAGE_MAX_CHARS {
-            return Err(NotifierError::MessageTooLong {
-                outcome: outcome.to_string(),
-                len,
-                max: nightbot::MESSAGE_MAX_CHARS,
-            });
-        }
+        let text = build_message(messages, &sample_update(outcome));
+        validate_message_text_len(outcome, &text)?;
     }
     Ok(())
+}
+
+fn validate_message_text_len(outcome: &str, text: &str) -> Result<(), NotifierError> {
+    let len = text.chars().count();
+    if len > nightbot::MESSAGE_MAX_CHARS {
+        return Err(NotifierError::MessageTooLong {
+            outcome: outcome.to_string(),
+            len,
+            max: nightbot::MESSAGE_MAX_CHARS,
+        });
+    }
+    Ok(())
+}
+
+fn sample_update(outcome: &str) -> CounterUpdate {
+    CounterUpdate {
+        victories: 1,
+        defeats: 1,
+        draws: 1,
+        last_outcome: Some(outcome.to_string()),
+        timestamp: 0.0,
+        source: "auto".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -418,33 +464,98 @@ mod tests {
         }
     }
 
+    fn update(outcome: &str, victories: u32, defeats: u32, draws: u32) -> CounterUpdate {
+        CounterUpdate {
+            victories,
+            defeats,
+            draws,
+            last_outcome: Some(outcome.to_string()),
+            timestamp: 0.0,
+            source: "auto".to_string(),
+        }
+    }
+
     #[test]
     fn build_message_ja() {
         let m = msgs("ja");
-        assert_eq!(build_message(&m, "victory"), "勝利！");
-        assert_eq!(build_message(&m, "defeat"), "敗北…");
-        assert_eq!(build_message(&m, "draw"), "引き分け");
+        assert_eq!(build_message(&m, &update("victory", 1, 0, 0)), "勝利！");
+        assert_eq!(build_message(&m, &update("defeat", 0, 1, 0)), "敗北…");
+        assert_eq!(build_message(&m, &update("draw", 0, 0, 1)), "引き分け");
     }
 
     #[test]
     fn build_message_en() {
         let m = msgs("en");
-        assert_eq!(build_message(&m, "victory"), "Victory！");
-        assert_eq!(build_message(&m, "defeat"), "Defeat…");
-        assert_eq!(build_message(&m, "draw"), "Draw");
+        assert_eq!(build_message(&m, &update("victory", 1, 0, 0)), "Victory！");
+        assert_eq!(build_message(&m, &update("defeat", 0, 1, 0)), "Defeat…");
+        assert_eq!(build_message(&m, &update("draw", 0, 0, 1)), "Draw");
     }
 
     #[test]
     fn build_message_template_without_placeholder() {
         let mut m = msgs("ja");
         m.victory = "固定文言".to_string();
-        assert_eq!(build_message(&m, "victory"), "固定文言");
+        assert_eq!(build_message(&m, &update("victory", 1, 0, 0)), "固定文言");
     }
 
     #[test]
     fn build_message_unknown_outcome_returns_empty() {
         let m = msgs("ja");
-        assert_eq!(build_message(&m, "unknown"), "");
+        assert_eq!(build_message(&m, &update("unknown", 1, 1, 1)), "");
+    }
+
+    #[test]
+    fn build_message_replaces_counter_placeholders() {
+        let mut m = msgs("ja");
+        m.victory =
+            "{outcome}: {victories}勝 {defeats}敗 {draws}分 total={total} winrate={winrate}%"
+                .to_string();
+
+        assert_eq!(
+            build_message(&m, &update("victory", 2, 1, 3)),
+            "勝利: 2勝 1敗 3分 total=6 winrate=66.67%"
+        );
+    }
+
+    #[test]
+    fn build_message_winrate_ignores_draws() {
+        let mut m = msgs("ja");
+        m.victory = "{winrate}".to_string();
+
+        assert_eq!(build_message(&m, &update("victory", 1, 1, 98)), "50.00");
+    }
+
+    #[test]
+    fn build_message_winrate_zero_without_decided_matches() {
+        let mut m = msgs("ja");
+        m.draw = "{winrate}".to_string();
+
+        assert_eq!(build_message(&m, &update("draw", 0, 0, 3)), "0.00");
+    }
+
+    #[test]
+    fn build_message_time_is_24_hour_hms() {
+        let mut m = msgs("ja");
+        m.victory = "{time}".to_string();
+        let text = build_message(&m, &update("victory", 1, 0, 0));
+
+        assert_eq!(text.len(), 8);
+        assert_eq!(&text[2..3], ":");
+        assert_eq!(&text[5..6], ":");
+        assert!(text.chars().enumerate().all(|(idx, ch)| {
+            matches!(idx, 2 | 5) && ch == ':' || !matches!(idx, 2 | 5) && ch.is_ascii_digit()
+        }));
+    }
+
+    #[test]
+    fn build_message_unknown_placeholder_is_preserved() {
+        let mut m = msgs("ja");
+        m.victory = "{outcome} {unknown}".to_string();
+
+        assert_eq!(
+            build_message(&m, &update("victory", 1, 0, 0)),
+            "勝利 {unknown}"
+        );
     }
 
     #[test]

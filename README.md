@@ -43,6 +43,24 @@ Copy-Item config.example.toml config.toml
 
 配布版には `config.example.toml` が同梱されています。`config.toml` がまだ無い場合はコピーして作成してください。`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
 
+`[messages]` では投稿文を設定できます。利用可能なプレースホルダーは次の通りです。
+
+- `{outcome}`: `language = "ja"` では `勝利` / `敗北` / `引き分け`、それ以外では `Victory` / `Defeat` / `Draw`
+- `{victories}` / `{defeats}` / `{draws}`: 勝利数 / 敗北数 / 引き分け数
+- `{total}`: 勝利数 + 敗北数 + 引き分け数
+- `{winrate}`: 勝利数 / (勝利数 + 敗北数) * 100。小数第2位まで表示し、引き分けは母数から除外
+- `{time}`: notifier が投稿文を作成したローカル時刻 (`HH:MM:SS`)
+
+例:
+
+```toml
+[messages]
+language = "ja"
+victory = "{outcome}！ 現在 {victories}勝 {defeats}敗 {draws}分 / {total}戦 勝率{winrate}% ({time})"
+defeat = "{outcome}… 現在 {victories}勝 {defeats}敗 {draws}分 / {total}戦 勝率{winrate}% ({time})"
+draw = "{outcome} 現在 {victories}勝 {defeats}敗 {draws}分 / {total}戦 勝率{winrate}% ({time})"
+```
+
 ### 5. 認証
 
 **推奨**: 付属の PowerShell スクリプトで認証します。Client Secret はマスク入力し、スクリプト内で一時的に環境変数へ設定して `ow2-victory-notifier.exe` に渡します。終了時に環境変数は削除され、コマンド履歴やプロセス引数には Client Secret が残りません。
