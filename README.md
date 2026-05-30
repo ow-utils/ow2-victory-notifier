@@ -41,7 +41,7 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 Copy-Item config.example.toml config.toml
 ```
 
-配布版に `config.toml` が同梱されている場合は、このコピー手順は不要です。`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
+配布版には `config.example.toml` が同梱されています。`config.toml` がまだ無い場合はコピーして作成してください。`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
 
 ### 5. 認証
 

@@ -45,10 +45,12 @@ jobs:
             New-Item -ItemType Directory -Path $distRoot | Out-Null
           }
           New-Item -ItemType Directory -Path $packageRoot | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $packageRoot "scripts") | Out-Null
 
           Copy-Item "target/release/ow2-victory-notifier.exe" $packageRoot -Force
 
           Copy-Item "config.example.toml" (Join-Path $packageRoot "config.example.toml") -Force
+          Copy-Item "scripts/auth-nightbot.ps1" (Join-Path $packageRoot "scripts/auth-nightbot.ps1") -Force
           Copy-Item "README.md" (Join-Path $packageRoot "README.md") -Force
           Copy-Item "LICENSE" (Join-Path $packageRoot "LICENSE") -Force
 
