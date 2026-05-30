@@ -4,8 +4,8 @@ use serde::Deserialize;
 use std::pin::Pin;
 
 #[derive(Debug, Clone, Deserialize)]
-// notifier は last_outcome / source しか読まないが、SSE スキーマ契約として全フィールドを
-// 受理する (必須キーが消えたら早期にパース失敗で気付きたい)。
+// notifier は通知可否判定に last_outcome / source、メッセージ展開に勝敗数を使う。
+// SSE スキーマ契約として全フィールドを受理する (必須キーが消えたら早期にパース失敗で気付きたい)。
 #[allow(dead_code)]
 pub struct CounterUpdate {
     pub victories: u32,
