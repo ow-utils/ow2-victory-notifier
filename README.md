@@ -41,11 +41,13 @@ OW2 勝敗カウンター (`ow2-victory-counter`) の SSE `/events` を購読し
 Copy-Item config.example.toml config.toml
 ```
 
-`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
+配布版に `config.toml` が同梱されている場合は、このコピー手順は不要です。`callback_port` を変更したい場合のみ `config.toml` の `[nightbot]` セクションを編集します (通常はデフォルトの 8123 で問題ありません)。
 
 ### 5. 認証
 
-**推奨**: 付属の PowerShell スクリプトで認証します。Client Secret はマスク入力し、スクリプト内で一時的に環境変数へ設定して `cargo run` に渡します。終了時に環境変数は削除され、コマンド履歴やプロセス引数には Client Secret が残りません。
+**推奨**: 付属の PowerShell スクリプトで認証します。Client Secret はマスク入力し、スクリプト内で一時的に環境変数へ設定して `ow2-victory-notifier.exe` に渡します。終了時に環境変数は削除され、コマンド履歴やプロセス引数には Client Secret が残りません。
+
+既定では、配布フォルダにある `ow2-victory-notifier.exe` と `config.toml` を使います。
 
 ```powershell
 .\scripts\auth-nightbot.ps1 -Account twitch
@@ -66,7 +68,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\auth-nightbot.ps1 -Accou
 ### 6. 通知ループの起動
 
 ```powershell
-cargo run -- run --account twitch
+.\ow2-victory-notifier.exe run --account twitch
 ```
 
 `ow2-victory-counter` が一時的に落ちて SSE が切れても、本ツールは内部でバックオフ付き (1 秒から最大 60 秒) で再接続を試み続けます。再認証必須エラー (`invalid_grant` / `invalid_client` / スコープ不足) を踏んだ場合のみ非ゼロ終了するため、systemd 等で再起動だけでは復旧しません — その場合は `auth nightbot --account <name>` をやり直してください。
@@ -77,8 +79,8 @@ cargo run -- run --account twitch
 
 ```powershell
 $repo = (Get-Location).Path
-Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', 'cargo run -- run --account twitch'
-Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', 'cargo run -- run --account youtube'
+Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', '.\ow2-victory-notifier.exe run --account twitch'
+Start-Process pwsh -WorkingDirectory $repo -ArgumentList '-NoExit', '-Command', '.\ow2-victory-notifier.exe run --account youtube'
 ```
 
 > ⚠️ **同じ `--account` を 2 プロセスで同時起動しないこと**。両方が並行 refresh して片方が `invalid_grant` を踏み、credentials が壊れます。本ツールは fs2 advisory lock で同一 account の二重起動を検出し、2 つ目のプロセスは起動時に明示エラー終了します。
@@ -127,7 +129,7 @@ Nightbot の **refresh_token は「最後の使用から 60 日」で失効** �
 
 ```powershell
 $account = 'twitch'
-cargo run -- check --account $account --force-refresh
+.\ow2-victory-notifier.exe check --account $account --force-refresh
 ```
 
 `--force-refresh` を付けると期限判定を迂回して無条件で refresh + 保存します。フラグ無しの `check` は access_token が残っている間は refresh を発火しないため、延命にはなりません。
@@ -141,7 +143,7 @@ cargo run -- check --account $account --force-refresh
 
 ### 障害時の切り分け手順
 
-1. `cargo run -- check --account <name>` で疎通確認 (SSE + Nightbot API + Join 状態)
+1. `.\ow2-victory-notifier.exe check --account <name>` で疎通確認 (SSE + Nightbot API + Join 状態)
 2. [Nightbot ダッシュボード](https://nightbot.tv/) でアカウント・Join 状態を確認
 3. 必要なら `auth nightbot --account <name> ...` で再認証
 
