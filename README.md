@@ -45,17 +45,21 @@ Copy-Item config.example.toml config.toml
 
 ### 5. 認証
 
-**推奨**: client_secret は環境変数経由で渡します (コマンド履歴やプロセス引数に残りにくい)。
+**推奨**: 付属の PowerShell スクリプトで認証します。Client Secret はマスク入力し、スクリプト内で一時的に環境変数へ設定して `cargo run` に渡します。終了時に環境変数は削除され、コマンド履歴やプロセス引数には Client Secret が残りません。
 
 ```powershell
-$env:NIGHTBOT_CLIENT_SECRET = 'コピーした Client Secret'
-$clientId = 'コピーした Client ID'
-cargo run -- auth nightbot --account twitch `
-    --client-id $clientId `
-    --client-secret-env NIGHTBOT_CLIENT_SECRET
+.\scripts\auth-nightbot.ps1 -Account twitch
 ```
 
-表示された URL をブラウザで開き、Nightbot の承認画面で `channel` と `channel_send` の 2 スコープを許可します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
+実行ポリシーでブロックされる場合は、次のように `pwsh` から明示的に実行してください。
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\auth-nightbot.ps1 -Account twitch
+```
+
+画面の指示に従って **Client ID** と **Client Secret** を入力します。Client ID は `-ClientId` で渡すこともできます。
+
+表示された URL をブラウザで開き、Nightbot の承認画面で要求内容を確認して承認します。本ツールは認可 URL で `channel` と `channel_send` を要求し、認証後に付与済みスコープを検証します。承認しないまま 5 分経過するとタイムアウトしますが、それ以前に **Ctrl+C で中断** することもできます (ポートはすぐ解放されます)。
 
 `--client-secret <SECRET>` で直接渡すこともできますが、コマンド履歴やプロセス引数に残るため非推奨です (試験用途のみ)。
 
@@ -110,12 +114,7 @@ Nightbot の OAuth アプリ管理画面で client_secret を rotate (再発行)
 rotate 直後に必ず以下を実行してください:
 
 ```powershell
-$env:NIGHTBOT_CLIENT_SECRET = '新しい Client Secret'
-$clientId = 'Client ID'
-$account = 'twitch'
-cargo run -- auth nightbot --account $account `
-    --client-id $clientId `
-    --client-secret-env NIGHTBOT_CLIENT_SECRET
+.\scripts\auth-nightbot.ps1 -Account twitch
 ```
 
 `auth nightbot` は credentials を上書きするため、新 secret が `credentials-{account}.toml` に書き込まれて以降の refresh が成功するようになります。
